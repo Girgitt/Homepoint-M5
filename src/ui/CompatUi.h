@@ -2,10 +2,13 @@
 
 #include <Arduino.h>
 #include <M5Unified.h>
+#include <vector>
 
 #include "PressGesture.h"
 #include "ScreenPowerFsm.h"
+#include "StatusCenterCycle.h"
 #include "TileInteraction.h"
+#include "UiChange.h"
 #include "../model/Model.h"
 #include "../network/MqttManager.h"
 #include "../network/WifiManager.h"
@@ -24,7 +27,14 @@ class CompatUi {
   void setDebugMode(bool enabled);
   bool debugMode() const { return debugMode_; }
   void tick();
-  void invalidate() { dirty_ = true; }
+
+  // Renderer-independent semantic invalidation entry point. Application and
+  // model/network code report what changed; this backend decides which
+  // physical screen regions need repainting. A later LVGL backend can consume
+  // the same UiChange values and invalidate/update LVGL objects instead.
+  void applyChange(const core::UiChange& change);
+  void invalidate() { applyChange(core::UiChange::full()); }
+
   void showMessage(const String& message);
   void clearMessage();
 
@@ -58,27 +68,65 @@ class CompatUi {
   std::size_t homePage_ = 0;
   std::size_t detailPage_ = 0;
 
-  bool dirty_ = true;
+  bool fullDirty_ = true;
+  bool contentDirty_ = true;
+  bool statusLeftDirty_ = true;
+  bool statusCenterDirty_ = true;
+  bool statusRightDirty_ = true;
+  bool footerDirty_ = true;
+  std::vector<bool> homeTileDirty_;
+  std::vector<bool> detailItemDirty_;
+
   core::ScreenPowerFsm screenPowerFsm_;
   core::PressGestureClassifier tilePressGesture_;
+  core::StatusCenterCycle statusCenterCycle_;
   bool homeTilePressActive_ = false;
   std::size_t homeTilePressTile_ = 0;
   int homeTilePressStartX_ = 0;
   int homeTilePressStartY_ = 0;
   String message_;
   std::uint32_t lastInteractionAt_ = 0;
-  std::uint32_t lastStatusDrawAt_ = 0;
+  int lastClockMinute_ = -1;
+  bool visualStatusSnapshotReady_ = false;
+  bool lastWifiOnline_ = false;
+  bool lastMqttOnline_ = false;
+  String lastIpAddress_;
+  String lastWifiStatusText_;
 
   void draw();
+  void drawContent();
+  void flushInvalidations(std::uint32_t now);
+  bool hasPendingInvalidations() const;
+  void clearPendingInvalidations();
+  void ensureDirtyStorage();
+  void markVisibleModelItemDirty(std::size_t tileIndex, std::size_t itemIndex);
+  void updateTimedStatusInvalidation(std::uint32_t now);
+  void markNavigationDirty();
+
   void drawStatusBar();
   void drawStatusBarDebug();
   void drawStatusBarUser();
+  void drawStatusLeftUser();
+  void drawStatusCenterUser();
+  void drawStatusRightUser();
+  String userStatusCenterText() const;
+
   void drawHome();
   void drawHomeDebug();
   void drawHomeUser();
+  void drawHomeTileDebug(std::size_t tileIndex);
+  void drawHomeTileUser(std::size_t tileIndex);
+  void drawHomeUserGrid();
+  void drawDirtyHomeTiles();
+
   void drawTileDetail();
   void drawTileDetailDebug();
   void drawTileDetailUser();
+  void drawDetailItemDebug(std::size_t itemIndex);
+  void drawDetailItemUser(std::size_t itemIndex);
+  void drawDetailUserGrid();
+  void drawDirtyDetailItems();
+
   void drawFooter();
   void drawFooterDebug();
   void drawFooterUser();

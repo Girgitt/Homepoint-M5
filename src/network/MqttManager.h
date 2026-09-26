@@ -19,7 +19,13 @@ enum class MqttState {
 
 class MqttManager {
  public:
-  void begin(model::AppConfig* config, std::function<void()> modelChanged);
+  using ModelChangedCallback = std::function<void(const model::ModelChange&)>;
+  using StatusChangedCallback = std::function<void()>;
+
+  void begin(
+      model::AppConfig* config,
+      ModelChangedCallback modelChanged,
+      StatusChangedCallback statusChanged = {});
   void reconfigure(model::AppConfig* config);
   void tick();
 
@@ -31,7 +37,8 @@ class MqttManager {
 
  private:
   model::AppConfig* config_ = nullptr;
-  std::function<void()> modelChanged_;
+  ModelChangedCallback modelChanged_;
+  StatusChangedCallback statusChanged_;
 
   WiFiClient net_;
   MQTTClient client_{2048};
@@ -48,6 +55,7 @@ class MqttManager {
   bool connect();
   void subscribeAll();
   void handleMessage(String& topic, String& payload);
+  void setState(MqttState state);
 
   static String clientId();
   static String jsonValueByKeyAnywhere(const String& payload, const String& key);

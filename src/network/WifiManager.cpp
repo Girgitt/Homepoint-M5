@@ -1,6 +1,7 @@
 #include "WifiManager.h"
 
 #include <ArduinoJson.h>
+#include <utility>
 
 namespace homepoint::network {
 namespace {
@@ -10,8 +11,21 @@ IPAddress kApMask(255, 255, 255, 0);
 
 }  // namespace
 
-void WifiManager::begin(const config::BootstrapSettings& settings) {
+void WifiManager::notifyStatusChanged() {
+  if (statusChanged_) statusChanged_();
+}
+
+void WifiManager::setState(WifiState state, bool forceNotify) {
+  const bool changed = state_ != state;
+  state_ = state;
+  if (changed || forceNotify) notifyStatusChanged();
+}
+
+void WifiManager::begin(
+    const config::BootstrapSettings& settings,
+    StatusChangedCallback statusChanged) {
   settings_ = settings;
+  statusChanged_ = std::move(statusChanged);
 
   WiFi.persistent(false);
   WiFi.setAutoReconnect(false);
@@ -23,7 +37,7 @@ void WifiManager::begin(const config::BootstrapSettings& settings) {
   if (!settings_.configured || settings_.wifiSsid.isEmpty()) {
     Serial.println("[WIFI] bootstrap Wi-Fi not configured; starting provisioning AP");
     startAp(kProvisioningSsid, true);
-    state_ = WifiState::Provisioning;
+    setState(WifiState::Provisioning, true);
     return;
   }
 
@@ -41,7 +55,7 @@ void WifiManager::startStation() {
   }
   WiFi.begin(settings_.wifiSsid.c_str(), settings_.wifiPassword.c_str());
 
-  state_ = WifiState::Connecting;
+  setState(WifiState::Connecting);
   connectStartedAt_ = millis();
   nextReconnectAt_ = millis() + reconnectDelayMs_;
 }
@@ -64,12 +78,13 @@ void WifiManager::startAp(const char* ssid, bool provisioning) {
 
   provisioningApActive_ = provisioning;
   recoveryApActive_ = !provisioning;
+  notifyStatusChanged();
 }
 
 void WifiManager::onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t) {
   switch (event) {
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-      state_ = WifiState::Connected;
+      setState(WifiState::Connected, true);
       Serial.printf(
           "[WIFI] station ONLINE: ip=%s gateway=%s rssi=%d dBm\n",
           WiFi.localIP().toString().c_str(),
@@ -82,7 +97,7 @@ void WifiManager::onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t) {
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
       Serial.println("[WIFI] station disconnected");
       if (settings_.configured) {
-        state_ = WifiState::Disconnected;
+        setState(WifiState::Disconnected);
         nextReconnectAt_ = millis() + reconnectDelayMs_;
         reconnectDelayMs_ = reconnectDelayMs_ >= 30000u ? 60000u : reconnectDelayMs_ * 2u;
       }
@@ -111,7 +126,7 @@ void WifiManager::tick() {
 
   if (nextReconnectAt_ && static_cast<std::int32_t>(now - nextReconnectAt_) >= 0) {
     WiFi.reconnect();
-    state_ = WifiState::Connecting;
+    setState(WifiState::Connecting);
     nextReconnectAt_ = now + reconnectDelayMs_;
   }
 }

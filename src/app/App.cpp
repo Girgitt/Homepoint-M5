@@ -87,11 +87,19 @@ void App::setup() {
 
   applyHardwareConfig();
 
-  wifi_.begin(bootstrap_);
-
-  mqtt_.begin(&config_, [this]() {
-    ui_.invalidate();
+  wifi_.begin(bootstrap_, [this]() {
+    wifiStatusPending_.store(true, std::memory_order_relaxed);
   });
+
+  mqtt_.begin(
+      &config_,
+      [this](const model::ModelChange& change) {
+        ui_.applyChange(core::UiChange::modelItem(
+            change.tileIndex, change.itemIndex));
+      },
+      [this]() {
+        mqttStatusPending_.store(true, std::memory_order_relaxed);
+      });
 
   ui_.begin(&config_, &wifi_, &mqtt_, bootstrap_.debugUi);
   if (!bootstrap_.configured) {
@@ -117,9 +125,19 @@ void App::loop() {
   mqtt_.tick();
   web_.tick();
   maybeConfigureTime();
+  processPendingUiStatusChanges();
   ui_.tick();
 
   delay(5);
+}
+
+void App::processPendingUiStatusChanges() {
+  if (wifiStatusPending_.exchange(false, std::memory_order_relaxed)) {
+    ui_.applyChange(core::UiChange::wifiStatus());
+  }
+  if (mqttStatusPending_.exchange(false, std::memory_order_relaxed)) {
+    ui_.applyChange(core::UiChange::mqttStatus());
+  }
 }
 
 void App::reloadConfiguration() {

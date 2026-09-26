@@ -124,6 +124,11 @@ struct HardwareConfig {
   bool touchYAxisInverted = true;
 };
 
+struct ModelChange {
+  std::size_t tileIndex = 0;
+  std::size_t itemIndex = 0;
+};
+
 struct AppConfig {
   static constexpr int kCurrentSchemaVersion = 2;
 

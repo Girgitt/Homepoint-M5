@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <DNSServer.h>
 #include <WiFi.h>
+#include <functional>
 
 #include "../config/PersistentSettings.h"
 
@@ -17,7 +18,11 @@ enum class WifiState {
 
 class WifiManager {
  public:
-  void begin(const config::BootstrapSettings& settings);
+  using StatusChangedCallback = std::function<void()>;
+
+  void begin(
+      const config::BootstrapSettings& settings,
+      StatusChangedCallback statusChanged = {});
   void tick();
 
   WifiState state() const { return state_; }
@@ -43,10 +48,13 @@ class WifiManager {
   std::uint32_t connectStartedAt_ = 0;
   std::uint32_t nextReconnectAt_ = 0;
   std::uint32_t reconnectDelayMs_ = 2000;
+  StatusChangedCallback statusChanged_;
 
   void startStation();
   void startAp(const char* ssid, bool provisioning);
   void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
+  void setState(WifiState state, bool forceNotify = false);
+  void notifyStatusChanged();
 };
 
 }  // namespace homepoint::network

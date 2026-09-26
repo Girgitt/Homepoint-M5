@@ -3,6 +3,8 @@
 #include "Crc16.h"
 #include "PressGesture.h"
 #include "ScreenPowerFsm.h"
+#include "StatusCenterCycle.h"
+#include "UiChange.h"
 #include "TileInteraction.h"
 
 void setUp() {}
@@ -155,6 +157,58 @@ void test_tile_behavior_resolves_gestures_independently_of_tile_type() {
       static_cast<int>(resolveTileAction(dimmerLike, TileGesture::LongPress)));
 }
 
+
+void test_status_center_cycle_uses_four_seconds_time_two_seconds_ip() {
+  using homepoint::core::StatusCenterCycle;
+  using homepoint::core::StatusCenterMode;
+
+  StatusCenterCycle cycle;
+  cycle.reset(100);
+
+  TEST_ASSERT_TRUE(cycle.update(100, true, true));
+  TEST_ASSERT_EQUAL_INT(
+      static_cast<int>(StatusCenterMode::Time),
+      static_cast<int>(cycle.mode()));
+
+  TEST_ASSERT_FALSE(cycle.update(4099, true, true));
+  TEST_ASSERT_TRUE(cycle.update(4100, true, true));
+  TEST_ASSERT_EQUAL_INT(
+      static_cast<int>(StatusCenterMode::Ip),
+      static_cast<int>(cycle.mode()));
+
+  TEST_ASSERT_FALSE(cycle.update(6099, true, true));
+  TEST_ASSERT_TRUE(cycle.update(6100, true, true));
+  TEST_ASSERT_EQUAL_INT(
+      static_cast<int>(StatusCenterMode::Time),
+      static_cast<int>(cycle.mode()));
+}
+
+void test_status_center_cycle_handles_single_available_source() {
+  using homepoint::core::StatusCenterCycle;
+  using homepoint::core::StatusCenterMode;
+
+  StatusCenterCycle cycle;
+  cycle.reset(0);
+  cycle.update(0, false, true);
+  TEST_ASSERT_EQUAL_INT(
+      static_cast<int>(StatusCenterMode::Ip),
+      static_cast<int>(cycle.mode()));
+
+  cycle.update(10000, true, false);
+  TEST_ASSERT_EQUAL_INT(
+      static_cast<int>(StatusCenterMode::Time),
+      static_cast<int>(cycle.mode()));
+}
+
+void test_ui_change_preserves_model_item_coordinates() {
+  const auto change = homepoint::core::UiChange::modelItem(3, 7);
+  TEST_ASSERT_EQUAL_INT(
+      static_cast<int>(homepoint::core::UiChangeKind::ModelItem),
+      static_cast<int>(change.kind));
+  TEST_ASSERT_EQUAL_UINT32(3, change.tileIndex);
+  TEST_ASSERT_EQUAL_UINT32(7, change.itemIndex);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_crc16_ibm_known_vector);
@@ -165,5 +219,8 @@ int main(int, char**) {
   RUN_TEST(test_press_gesture_long_press_emits_once_and_consumes_release);
   RUN_TEST(test_press_gesture_cancel_suppresses_action_until_release);
   RUN_TEST(test_tile_behavior_resolves_gestures_independently_of_tile_type);
+  RUN_TEST(test_status_center_cycle_uses_four_seconds_time_two_seconds_ip);
+  RUN_TEST(test_status_center_cycle_handles_single_available_source);
+  RUN_TEST(test_ui_change_preserves_model_item_coordinates);
   return UNITY_END();
 }

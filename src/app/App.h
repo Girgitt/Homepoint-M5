@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <atomic>
 
 #include "../config/ConfigStore.h"
 #include "../config/PersistentSettings.h"
@@ -31,11 +32,14 @@ class App {
   bool configValid_ = false;
   bool timeConfigured_ = false;
   bool previousWifiConnected_ = false;
+  std::atomic<bool> wifiStatusPending_{false};
+  std::atomic<bool> mqttStatusPending_{false};
   String configMessage_;
 
   void reloadConfiguration();
   void applyHardwareConfig();
   void maybeConfigureTime();
+  void processPendingUiStatusChanges();
   void setDebugUi(bool enabled);
 };
 

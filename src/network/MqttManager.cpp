@@ -36,9 +36,18 @@ String scalarToString(JsonVariantConst value) {
 }  // namespace
 
 void MqttManager::begin(
-    model::AppConfig* config, std::function<void()> modelChanged) {
+    model::AppConfig* config,
+    ModelChangedCallback modelChanged,
+    StatusChangedCallback statusChanged) {
   modelChanged_ = std::move(modelChanged);
+  statusChanged_ = std::move(statusChanged);
   reconfigure(config);
+}
+
+void MqttManager::setState(MqttState state) {
+  if (state_ == state) return;
+  state_ = state;
+  if (statusChanged_) statusChanged_();
 }
 
 void MqttManager::reconfigure(model::AppConfig* config) {
@@ -51,22 +60,22 @@ void MqttManager::reconfigure(model::AppConfig* config) {
   nextReconnectAt_ = 0;
 
   if (!config_ || config_->mqtt.uri.isEmpty()) {
-    state_ = MqttState::Disabled;
+    setState(MqttState::Disabled);
     Serial.println("[MQTT] disabled: mqttbroker is not configured");
     return;
   }
 
   if (!parseUri(config_->mqtt.uri)) {
-    state_ = MqttState::Error;
+    setState(MqttState::Error);
     Serial.printf("[MQTT] invalid broker URI: '%s'\n", config_->mqtt.uri.c_str());
     return;
   }
 
   Serial.printf("[MQTT] configured broker: %s:%u\n", host_.c_str(), port_);
   configureClient();
-  state_ = WiFi.status() == WL_CONNECTED
+  setState(WiFi.status() == WL_CONNECTED
                ? MqttState::Connecting
-               : MqttState::WaitingForWifi;
+               : MqttState::WaitingForWifi);
   nextReconnectAt_ = millis();
 }
 
@@ -105,34 +114,33 @@ void MqttManager::configureClient() {
 
 void MqttManager::tick() {
   if (!config_ || config_->mqtt.uri.isEmpty()) {
-    state_ = MqttState::Disabled;
+    setState(MqttState::Disabled);
     return;
   }
 
   if (WiFi.status() != WL_CONNECTED) {
     if (client_.connected()) client_.disconnect();
-    state_ = MqttState::WaitingForWifi;
+    setState(MqttState::WaitingForWifi);
     return;
   }
 
   if (client_.connected()) {
     client_.loop();
-    state_ = MqttState::Connected;
+    setState(MqttState::Connected);
     return;
   }
 
   const auto now = millis();
   if (static_cast<std::int32_t>(now - nextReconnectAt_) < 0) return;
 
-  state_ = MqttState::Connecting;
+  setState(MqttState::Connecting);
   if (connect()) {
-    state_ = MqttState::Connected;
+    setState(MqttState::Connected);
     reconnectDelayMs_ = 3000;
     Serial.printf("[MQTT] ONLINE: broker=%s:%u\n", host_.c_str(), port_);
     subscribeAll();
-    if (modelChanged_) modelChanged_();
   } else {
-    state_ = MqttState::Error;
+    setState(MqttState::Error);
     Serial.printf(
         "[MQTT] connection failed: error=%d returnCode=%d retry-in=%u ms\n",
         static_cast<int>(client_.lastError()),
@@ -179,44 +187,48 @@ void MqttManager::subscribeAll() {
 
 void MqttManager::handleMessage(String& topic, String& payload) {
   if (!config_) return;
-  bool changed = false;
 
-  for (auto& tile : config_->tiles) {
-    for (auto& item : tile.items) {
+  for (std::size_t tileIndex = 0; tileIndex < config_->tiles.size(); ++tileIndex) {
+    auto& tile = config_->tiles[tileIndex];
+    for (std::size_t itemIndex = 0; itemIndex < tile.items.size(); ++itemIndex) {
+      auto& item = tile.items[itemIndex];
+      bool itemChanged = false;
+
       if (item.type == model::TileItemType::Switch) {
         auto& device = item.switchDevice;
         if (device.getTopic != topic) continue;
         const bool before = device.active;
         if (payload == device.onValue) device.active = true;
         if (payload == device.offValue) device.active = false;
-        changed = changed || before != device.active;
-        continue;
+        itemChanged = before != device.active;
+      } else {
+        auto& device = item.sensorDevice;
+        if (device.getTopic != topic) continue;
+
+        if (device.jsonData) {
+          const String first = jsonValueByKeyAnywhere(payload, device.firstKey);
+          const String second = device.type == model::SensorType::CombinedValues
+                                    ? jsonValueByKeyAnywhere(payload, device.secondKey)
+                                    : "";
+          if (!first.isEmpty() && first != device.firstValue) {
+            device.firstValue = first;
+            itemChanged = true;
+          }
+          if (!second.isEmpty() && second != device.secondValue) {
+            device.secondValue = second;
+            itemChanged = true;
+          }
+        } else if (payload != device.firstValue) {
+          device.firstValue = payload;
+          itemChanged = true;
+        }
       }
 
-      auto& device = item.sensorDevice;
-      if (device.getTopic != topic) continue;
-
-      if (device.jsonData) {
-        const String first = jsonValueByKeyAnywhere(payload, device.firstKey);
-        const String second = device.type == model::SensorType::CombinedValues
-                                  ? jsonValueByKeyAnywhere(payload, device.secondKey)
-                                  : "";
-        if (!first.isEmpty() && first != device.firstValue) {
-          device.firstValue = first;
-          changed = true;
-        }
-        if (!second.isEmpty() && second != device.secondValue) {
-          device.secondValue = second;
-          changed = true;
-        }
-      } else if (payload != device.firstValue) {
-        device.firstValue = payload;
-        changed = true;
+      if (itemChanged && modelChanged_) {
+        modelChanged_({tileIndex, itemIndex});
       }
     }
   }
-
-  if (changed && modelChanged_) modelChanged_();
 }
 
 bool MqttManager::switchTile(std::uint16_t tileId, bool on) {
@@ -226,17 +238,20 @@ bool MqttManager::switchTile(std::uint16_t tileId, bool on) {
   auto& tile = config_->tiles[tileId];
   bool sawSwitch = false;
   bool ok = true;
-  for (auto& item : tile.items) {
+  for (std::size_t itemIndex = 0; itemIndex < tile.items.size(); ++itemIndex) {
+    auto& item = tile.items[itemIndex];
     if (item.type != model::TileItemType::Switch) continue;
     sawSwitch = true;
     auto& device = item.switchDevice;
     const String& value = on ? device.onValue : device.offValue;
     const bool published = client_.publish(device.setTopic, value);
     ok = published && ok;
-    if (published) device.active = on;
+    if (published && device.active != on) {
+      device.active = on;
+      if (modelChanged_) modelChanged_({tileId, itemIndex});
+    }
   }
 
-  if (sawSwitch && modelChanged_) modelChanged_();
   return sawSwitch && ok;
 }
 
@@ -246,14 +261,15 @@ bool MqttManager::switchTileItem(
   if (tileId >= config_->tiles.size()) return false;
 
   auto& tile = config_->tiles[tileId];
-  for (auto& item : tile.items) {
+  for (std::size_t itemIndex = 0; itemIndex < tile.items.size(); ++itemIndex) {
+    auto& item = tile.items[itemIndex];
     if (item.id != itemId || item.type != model::TileItemType::Switch) continue;
     auto& device = item.switchDevice;
     const String& value = on ? device.onValue : device.offValue;
     const bool ok = client_.publish(device.setTopic, value);
-    if (ok) {
+    if (ok && device.active != on) {
       device.active = on;
-      if (modelChanged_) modelChanged_();
+      if (modelChanged_) modelChanged_({tileId, itemIndex});
     }
     return ok;
   }

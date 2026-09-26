@@ -3,6 +3,7 @@
 #include "CompatUi.h"
 #include <WiFi.h>
 #include <ctime>
+#include <algorithm>
 
 namespace homepoint::ui {
 namespace {
@@ -17,7 +18,6 @@ constexpr int kDebugDetailItemsPerPage = 4;
 constexpr int kUserDetailItemsPerPage = 6;
 constexpr int kTilePressMoveTolerance = 18;
 constexpr std::uint32_t kDefaultLongPressMs = 600;
-constexpr std::uint32_t kUserStatusAlternateMs = 4000;
 constexpr int kUserTileVisualBottom = 72;
 constexpr int kUserCaptionHeight = 8;
 
@@ -100,6 +100,20 @@ int userTileCaptionY(int tileTop, int tileHeight) {
       + (remaining - kUserCaptionHeight) / 2;
 }
 
+int gridStart(int total, int index, int count) {
+  return total * index / count;
+}
+
+int gridEnd(int total, int index, int count) {
+  return total * (index + 1) / count;
+}
+
+int gridIndex(int coordinate, int total, int count) {
+  if (total <= 0) return 0;
+  const int index = coordinate * count / total;
+  return std::min(count - 1, std::max(0, index));
+}
+
 }  // namespace
 
 void CompatUi::begin(
@@ -112,6 +126,13 @@ void CompatUi::begin(
   mqtt_ = mqtt;
   debugMode_ = debugMode;
   lastInteractionAt_ = millis();
+  statusCenterCycle_.reset(lastInteractionAt_);
+  lastWifiOnline_ = wifi_ && wifi_->stationConnected();
+  lastMqttOnline_ = mqtt_ && mqtt_->state() == network::MqttState::Connected;
+  lastIpAddress_ = wifi_ ? wifi_->ipAddress() : String();
+  lastWifiStatusText_ = wifi_ ? wifi_->statusText() : String();
+  visualStatusSnapshotReady_ = true;
+  ensureDirtyStorage();
 
   M5.Display.setRotation(config_ ? config_->hardware.screenRotationAngle : 1);
   M5.Display.invertDisplay(config_ ? config_->hardware.displayColorInverted : false);
@@ -122,7 +143,7 @@ void CompatUi::begin(
       debugMode_ ? "debug" : "user",
       static_cast<unsigned long>(config_ ? config_->ui.longPressMs
                                          : kDefaultLongPressMs));
-  dirty_ = true;
+  applyChange(core::UiChange::full());
 }
 
 void CompatUi::setConfig(model::AppConfig* config) {
@@ -132,6 +153,7 @@ void CompatUi::setConfig(model::AppConfig* config) {
   homePage_ = 0;
   detailPage_ = 0;
   resetHomeTilePress();
+  ensureDirtyStorage();
 
   if (config_) {
     M5.Display.setRotation(config_->hardware.screenRotationAngle);
@@ -142,8 +164,10 @@ void CompatUi::setConfig(model::AppConfig* config) {
   }
   screenPowerFsm_.forceAwake();
   lastInteractionAt_ = millis();
+  statusCenterCycle_.reset(lastInteractionAt_);
+  lastClockMinute_ = -1;
   setDisplayPowered(true);
-  dirty_ = true;
+  applyChange(core::UiChange::full());
 }
 
 void CompatUi::setDebugMode(bool enabled) {
@@ -153,7 +177,173 @@ void CompatUi::setDebugMode(bool enabled) {
   homePage_ = 0;
   detailPage_ = 0;
   resetHomeTilePress();
-  dirty_ = true;
+  statusCenterCycle_.reset(millis());
+  lastClockMinute_ = -1;
+  lastWifiOnline_ = wifi_ && wifi_->stationConnected();
+  lastMqttOnline_ = mqtt_ && mqtt_->state() == network::MqttState::Connected;
+  lastIpAddress_ = wifi_ ? wifi_->ipAddress() : String();
+  lastWifiStatusText_ = wifi_ ? wifi_->statusText() : String();
+  visualStatusSnapshotReady_ = true;
+  applyChange(core::UiChange::full());
+}
+
+void CompatUi::applyChange(const core::UiChange& change) {
+  switch (change.kind) {
+    case core::UiChangeKind::Full:
+      fullDirty_ = true;
+      return;
+
+    case core::UiChangeKind::ModelItem:
+      markVisibleModelItemDirty(change.tileIndex, change.itemIndex);
+      return;
+
+    case core::UiChangeKind::WifiStatus: {
+      if (debugMode_ || !wifi_ || !visualStatusSnapshotReady_) {
+        statusLeftDirty_ = true;
+        statusCenterDirty_ = true;
+        return;
+      }
+      const bool online = wifi_->stationConnected();
+      const String ip = wifi_->ipAddress();
+      const String status = wifi_->statusText();
+      if (online != lastWifiOnline_) statusLeftDirty_ = true;
+      if (online != lastWifiOnline_ || ip != lastIpAddress_ ||
+          status != lastWifiStatusText_) {
+        statusCenterDirty_ = true;
+      }
+      lastWifiOnline_ = online;
+      lastIpAddress_ = ip;
+      lastWifiStatusText_ = status;
+      return;
+    }
+
+    case core::UiChangeKind::MqttStatus: {
+      if (debugMode_ || !mqtt_ || !visualStatusSnapshotReady_) {
+        statusRightDirty_ = true;
+        return;
+      }
+      const bool online = mqtt_->state() == network::MqttState::Connected;
+      if (online != lastMqttOnline_) statusRightDirty_ = true;
+      lastMqttOnline_ = online;
+      return;
+    }
+
+    case core::UiChangeKind::CenterStatus:
+      statusCenterDirty_ = true;
+      return;
+
+    case core::UiChangeKind::Navigation:
+      markNavigationDirty();
+      return;
+
+    case core::UiChangeKind::Message:
+      contentDirty_ = true;
+      return;
+  }
+}
+
+void CompatUi::ensureDirtyStorage() {
+  const std::size_t tileCount = config_ ? config_->tiles.size() : 0;
+  homeTileDirty_.assign(tileCount, false);
+
+  std::size_t maxItems = 0;
+  if (config_) {
+    for (const auto& tile : config_->tiles) {
+      if (tile.items.size() > maxItems) maxItems = tile.items.size();
+    }
+  }
+  detailItemDirty_.assign(maxItems, false);
+}
+
+void CompatUi::markVisibleModelItemDirty(
+    std::size_t tileIndex,
+    std::size_t itemIndex) {
+  if (!config_ || !message_.isEmpty() || tileIndex >= config_->tiles.size()) {
+    return;
+  }
+
+  if (screen_ == Screen::Home) {
+    const std::size_t first = homePage_ * kTilesPerPage;
+    if (tileIndex >= first && tileIndex < first + kTilesPerPage) {
+      if (homeTileDirty_.size() != config_->tiles.size()) ensureDirtyStorage();
+      homeTileDirty_[tileIndex] = true;
+    }
+    return;
+  }
+
+  if (tileIndex != selectedTile_) return;
+  const auto& tile = config_->tiles[selectedTile_];
+  if (itemIndex >= tile.items.size()) return;
+
+  const std::size_t perPage = detailItemsPerPage();
+  const std::size_t first = detailPage_ * perPage;
+  if (itemIndex < first || itemIndex >= first + perPage) return;
+
+  if (detailItemDirty_.size() < tile.items.size()) {
+    detailItemDirty_.resize(tile.items.size(), false);
+  }
+  detailItemDirty_[itemIndex] = true;
+}
+
+void CompatUi::markNavigationDirty() {
+  contentDirty_ = true;
+  footerDirty_ = true;
+  statusCenterDirty_ = true;
+  statusCenterCycle_.reset(millis());
+  lastClockMinute_ = -1;
+}
+
+bool CompatUi::hasPendingInvalidations() const {
+  if (fullDirty_ || contentDirty_ || statusLeftDirty_ ||
+      statusCenterDirty_ || statusRightDirty_ || footerDirty_) {
+    return true;
+  }
+  for (bool dirty : homeTileDirty_) {
+    if (dirty) return true;
+  }
+  for (bool dirty : detailItemDirty_) {
+    if (dirty) return true;
+  }
+  return false;
+}
+
+void CompatUi::clearPendingInvalidations() {
+  fullDirty_ = false;
+  contentDirty_ = false;
+  statusLeftDirty_ = false;
+  statusCenterDirty_ = false;
+  statusRightDirty_ = false;
+  footerDirty_ = false;
+  std::fill(homeTileDirty_.begin(), homeTileDirty_.end(), false);
+  std::fill(detailItemDirty_.begin(), detailItemDirty_.end(), false);
+}
+
+void CompatUi::updateTimedStatusInvalidation(std::uint32_t now) {
+  if (screen_ != Screen::Home) return;
+
+  std::time_t wallNow = std::time(nullptr);
+  const bool haveTime = wallNow > 100000;
+  const bool haveIp = wifi_ && wifi_->stationConnected();
+
+  if (!debugMode_) {
+    if (statusCenterCycle_.update(now, haveTime, haveIp)) {
+      statusCenterDirty_ = true;
+    }
+  }
+
+  if (haveTime) {
+    std::tm local{};
+    localtime_r(&wallNow, &local);
+    const int minuteKey = local.tm_yday * 24 * 60 + local.tm_hour * 60 + local.tm_min;
+    if (minuteKey != lastClockMinute_) {
+      lastClockMinute_ = minuteKey;
+      if (debugMode_ || statusCenterCycle_.mode() == core::StatusCenterMode::Time) {
+        statusCenterDirty_ = true;
+      }
+    }
+  } else {
+    lastClockMinute_ = -1;
+  }
 }
 
 void CompatUi::tick() {
@@ -180,6 +370,9 @@ void CompatUi::tick() {
     Serial.println("[UI] screen FSM: OFF -> WAKE_GUARD (wake touch consumed)");
     resetHomeTilePress();
     lastInteractionAt_ = now;
+    statusCenterCycle_.reset(now);
+    lastClockMinute_ = -1;
+    if (screen_ == Screen::Home) statusCenterDirty_ = true;
     setDisplayPowered(true);
   } else if (powerStep.stateChanged &&
              previousPowerState == core::ScreenPowerState::WakeGuard &&
@@ -216,14 +409,8 @@ void CompatUi::tick() {
     resetHomeTilePress();
   }
 
-  if (dirty_) {
-    draw();
-    dirty_ = false;
-    lastStatusDrawAt_ = now;
-  } else if (now - lastStatusDrawAt_ >= 1000u) {
-    drawStatusBar();
-    lastStatusDrawAt_ = now;
-  }
+  updateTimedStatusInvalidation(now);
+  if (hasPendingInvalidations()) flushInvalidations(now);
 }
 
 bool CompatUi::screenTimeoutExpired(std::uint32_t now) const {
@@ -241,7 +428,6 @@ void CompatUi::setDisplayPowered(bool powered) {
     WiFi.setSleep(!powered);
   }
   M5.Display.setBrightness(powered ? 96 : 0);
-  if (powered) dirty_ = true;
 }
 
 int CompatUi::statusHeight() const {
@@ -252,19 +438,74 @@ std::size_t CompatUi::detailItemsPerPage() const {
   return debugMode_ ? kDebugDetailItemsPerPage : kUserDetailItemsPerPage;
 }
 
+void CompatUi::flushInvalidations(std::uint32_t) {
+  if (fullDirty_) {
+    // Consume the current invalidation set before drawing. If an asynchronous
+    // network callback reports another change during the repaint, that new
+    // invalidation remains pending for the next UI tick.
+    clearPendingInvalidations();
+    draw();
+    return;
+  }
+
+  const bool drawStatusLeft = statusLeftDirty_;
+  const bool drawStatusCenter = statusCenterDirty_;
+  const bool drawStatusRight = statusRightDirty_;
+  statusLeftDirty_ = statusCenterDirty_ = statusRightDirty_ = false;
+
+  if (debugMode_) {
+    if (drawStatusLeft || drawStatusCenter || drawStatusRight) {
+      drawStatusBarDebug();
+    }
+  } else {
+    if (drawStatusLeft) drawStatusLeftUser();
+    if (drawStatusCenter) drawStatusCenterUser();
+    if (drawStatusRight) drawStatusRightUser();
+  }
+
+  if (contentDirty_) {
+    contentDirty_ = false;
+    footerDirty_ = false;
+    std::fill(homeTileDirty_.begin(), homeTileDirty_.end(), false);
+    std::fill(detailItemDirty_.begin(), detailItemDirty_.end(), false);
+    drawContent();
+  } else if (message_.isEmpty()) {
+    if (screen_ == Screen::Home) {
+      drawDirtyHomeTiles();
+    } else {
+      drawDirtyDetailItems();
+    }
+  } else {
+    std::fill(homeTileDirty_.begin(), homeTileDirty_.end(), false);
+    std::fill(detailItemDirty_.begin(), detailItemDirty_.end(), false);
+  }
+
+  if (footerDirty_) {
+    footerDirty_ = false;
+    drawFooter();
+  }
+}
+
 void CompatUi::draw() {
   M5.Display.fillScreen(TFT_BLACK);
   drawStatusBar();
+  drawContent();
+}
+
+void CompatUi::drawContent() {
+  const int top = statusHeight();
+  M5.Display.fillRect(0, top, M5.Display.width(), M5.Display.height() - top, TFT_BLACK);
+
   if (!message_.isEmpty()) {
     M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
     M5.Display.setTextSize(1);
-    M5.Display.setCursor(8, statusHeight() + 16);
+    M5.Display.setCursor(8, top + 16);
     M5.Display.print(message_);
     return;
   }
   if (!config_) {
     M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-    M5.Display.setCursor(8, statusHeight() + 16);
+    M5.Display.setCursor(8, top + 16);
     M5.Display.print("No configuration");
     return;
   }
@@ -313,45 +554,64 @@ void CompatUi::drawStatusBarDebug() {
 }
 
 void CompatUi::drawStatusBarUser() {
-  const int width = M5.Display.width();
-  M5.Display.fillRect(0, 0, width, kUserStatusHeight, TFT_BLACK);
+  M5.Display.fillRect(0, 0, M5.Display.width(), kUserStatusHeight, TFT_BLACK);
+  drawStatusLeftUser();
+  drawStatusCenterUser();
+  drawStatusRightUser();
+}
 
+void CompatUi::drawStatusLeftUser() {
+  M5.Display.fillRect(0, 0, 25, kUserStatusHeight, TFT_BLACK);
   const bool wifiOnline = wifi_ && wifi_->stationConnected();
-  const bool mqttOnline = mqtt_ && mqtt_->state() == network::MqttState::Connected;
-
   const String wifiPath = wifiOnline ? "/wifi_on.jpg" : "/wifi_off.jpg";
   if (!drawJpgAsset(wifiPath, 0, 0)) {
     drawWifiIcon(10, 10, wifiOnline ? TFT_WHITE : originalGridColor());
   }
+}
 
+void CompatUi::drawStatusRightUser() {
+  const int width = M5.Display.width();
+  M5.Display.fillRect(width - 25, 0, 25, kUserStatusHeight, TFT_BLACK);
+  const bool mqttOnline = mqtt_ && mqtt_->state() == network::MqttState::Connected;
   const String mqttPath = mqttOnline ? "/mqtt_on.jpg" : "/mqtt_off.jpg";
   if (!drawJpgAsset(mqttPath, width - 25, 0)) {
     drawCloudIcon(width - 12, 10, mqttOnline ? TFT_WHITE : originalGridColor());
   }
+}
 
-  String center;
+String CompatUi::userStatusCenterText() const {
   if (screen_ == Screen::TileDetail && config_ && selectedTile_ < config_->tiles.size()) {
-    center = config_->tiles[selectedTile_].name;
-  } else {
-    std::time_t now = std::time(nullptr);
-    const bool haveTime = now > 100000;
-    const bool showIp = !haveTime || ((millis() / kUserStatusAlternateMs) % 2u == 0u);
-
-    if (showIp && wifiOnline) {
-      center = wifi_->ipAddress();
-    } else if (haveTime) {
-      std::tm local{};
-      localtime_r(&now, &local);
-      char clock[8];
-      std::snprintf(clock, sizeof(clock), "%02d:%02d", local.tm_hour, local.tm_min);
-      center = clock;
-    } else if (wifi_) {
-      center = wifi_->statusText();
-    }
+    return truncate(config_->tiles[selectedTile_].name, 30);
   }
 
-  center = truncate(center, 30);
-  drawCenteredText(center, width / 2, 6, TFT_WHITE, TFT_BLACK);
+  std::time_t now = std::time(nullptr);
+  const bool haveTime = now > 100000;
+  const bool wifiOnline = wifi_ && wifi_->stationConnected();
+
+  if (statusCenterCycle_.mode() == core::StatusCenterMode::Ip && wifiOnline) {
+    return truncate(wifi_->ipAddress(), 30);
+  }
+  if (statusCenterCycle_.mode() == core::StatusCenterMode::Time && haveTime) {
+    std::tm local{};
+    localtime_r(&now, &local);
+    char clock[8];
+    std::snprintf(clock, sizeof(clock), "%02d:%02d", local.tm_hour, local.tm_min);
+    return String(clock);
+  }
+  if (wifi_) return truncate(wifi_->statusText(), 30);
+  return "";
+}
+
+void CompatUi::drawStatusCenterUser() {
+  const int width = M5.Display.width();
+  constexpr int sideWidth = 25;
+  M5.Display.fillRect(
+      sideWidth,
+      0,
+      width - sideWidth * 2,
+      kUserStatusHeight,
+      TFT_BLACK);
+  drawCenteredText(userStatusCenterText(), width / 2, 6, TFT_WHITE, TFT_BLACK);
 }
 
 void CompatUi::drawHome() {
@@ -363,159 +623,197 @@ void CompatUi::drawHome() {
 }
 
 void CompatUi::drawHomeDebug() {
+  const std::size_t first = homePage_ * kTilesPerPage;
+  for (int slot = 0; slot < kTilesPerPage; ++slot) {
+    const std::size_t tileIndex = first + slot;
+    if (!config_ || tileIndex >= config_->tiles.size()) break;
+    drawHomeTileDebug(tileIndex);
+  }
+  if (footerVisible()) drawFooter();
+}
+
+void CompatUi::drawHomeTileDebug(std::size_t tileIndex) {
+  if (!config_ || tileIndex >= config_->tiles.size()) return;
+  const std::size_t first = homePage_ * kTilesPerPage;
+  if (tileIndex < first || tileIndex >= first + kTilesPerPage) return;
+
+  const int slot = static_cast<int>(tileIndex - first);
   const int width = M5.Display.width();
   const int height = M5.Display.height();
   const int footerHeight = footerVisible() ? kFooterHeight : 0;
   const int contentHeight = height - kDebugStatusHeight - footerHeight;
-  const int tileW = width / kColumns;
-  const int tileH = contentHeight / kRows;
+  const int col = slot % kColumns;
+  const int row = slot / kColumns;
+  const int x0 = gridStart(width, col, kColumns);
+  const int x1 = gridEnd(width, col, kColumns);
+  const int y0 = kDebugStatusHeight + gridStart(contentHeight, row, kRows);
+  const int y1 = kDebugStatusHeight + gridEnd(contentHeight, row, kRows);
+  const int tileW = x1 - x0;
+  const int tileH = y1 - y0;
+  auto& tile = config_->tiles[tileIndex];
 
-  const std::size_t first = homePage_ * kTilesPerPage;
+  M5.Display.fillRect(x0, y0, tileW, tileH, TFT_BLACK);
+  std::uint16_t fill = TFT_NAVY;
+  if (tile.switchCount() > 0 && tile.anySwitchOn()) fill = TFT_DARKGREEN;
 
-  for (int slot = 0; slot < kTilesPerPage; ++slot) {
-    const std::size_t tileIndex = first + slot;
-    if (!config_ || tileIndex >= config_->tiles.size()) break;
+  M5.Display.fillRect(x0 + 2, y0 + 2, tileW - 4, tileH - 4, fill);
+  M5.Display.drawRect(x0 + 2, y0 + 2, tileW - 4, tileH - 4, TFT_LIGHTGREY);
+  M5.Display.setTextColor(TFT_WHITE, fill);
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(x0 + 7, y0 + 10);
+  M5.Display.print(truncate(tile.name, 14));
+  M5.Display.setCursor(x0 + 7, y0 + 27);
 
-    auto& tile = config_->tiles[tileIndex];
-    const int col = slot % kColumns;
-    const int row = slot / kColumns;
-    const int x = col * tileW;
-    const int y = kDebugStatusHeight + row * tileH;
-
-    std::uint16_t fill = TFT_NAVY;
-    if (tile.switchCount() > 0 && tile.anySwitchOn()) {
-      fill = TFT_DARKGREEN;
-    }
-
-    M5.Display.fillRect(x + 2, y + 2, tileW - 4, tileH - 4, fill);
-    M5.Display.drawRect(x + 2, y + 2, tileW - 4, tileH - 4, TFT_LIGHTGREY);
-
-    M5.Display.setTextColor(TFT_WHITE, fill);
-    M5.Display.setTextSize(1);
-    M5.Display.setCursor(x + 7, y + 10);
-    M5.Display.print(truncate(tile.name, 14));
-
-    M5.Display.setCursor(x + 7, y + 27);
-    switch (tile.type) {
-      case model::TileType::Switch:
-        M5.Display.print("SWITCH ");
-        M5.Display.print(tile.allSwitchesOn() ? "ON" : "OFF");
-        break;
-
-      case model::TileType::Sensor:
-        M5.Display.print("SENSOR ");
-        if (!tile.items.empty() &&
-            tile.items.front().type == model::TileItemType::Sensor) {
-          M5.Display.print(truncate(tile.items.front().sensorDevice.firstValue, 8));
-        }
-        break;
-
-      case model::TileType::Scene:
-        M5.Display.print("SCENE (");
-        M5.Display.print(static_cast<unsigned>(tile.items.size()));
-        M5.Display.print(")");
-        break;
-    }
-
-    M5.Display.setCursor(x + 7, y + tileH - 28);
-    if (tile.switchCount() > 0) {
-      M5.Display.print("tap=toggle");
-    } else {
-      M5.Display.print("tap=detail");
-    }
-    M5.Display.setCursor(x + 7, y + tileH - 16);
-    M5.Display.print("hold=detail");
+  switch (tile.type) {
+    case model::TileType::Switch:
+      M5.Display.print("SWITCH ");
+      M5.Display.print(tile.allSwitchesOn() ? "ON" : "OFF");
+      break;
+    case model::TileType::Sensor:
+      M5.Display.print("SENSOR ");
+      if (!tile.items.empty() && tile.items.front().type == model::TileItemType::Sensor) {
+        M5.Display.print(truncate(tile.items.front().sensorDevice.firstValue, 8));
+      }
+      break;
+    case model::TileType::Scene:
+      M5.Display.print("SCENE (");
+      M5.Display.print(static_cast<unsigned>(tile.items.size()));
+      M5.Display.print(")");
+      break;
   }
 
-  if (footerVisible()) drawFooter();
+  M5.Display.setCursor(x0 + 7, y0 + tileH - 28);
+  M5.Display.print(tile.switchCount() > 0 ? "tap=toggle" : "tap=detail");
+  M5.Display.setCursor(x0 + 7, y0 + tileH - 16);
+  M5.Display.print("hold=detail");
 }
 
 void CompatUi::drawHomeUser() {
   const int width = M5.Display.width();
   const int height = M5.Display.height();
   const int footerHeight = footerVisible() ? kFooterHeight : 0;
-  const int contentTop = kUserStatusHeight;
-  const int contentHeight = height - contentTop - footerHeight;
-  const int tileW = width / kColumns;
-  const int tileH = contentHeight / kRows;
+  const int contentHeight = height - kUserStatusHeight - footerHeight;
+  M5.Display.fillRect(0, kUserStatusHeight, width, contentHeight, TFT_BLACK);
+
   const std::size_t first = homePage_ * kTilesPerPage;
-  const auto grid = originalGridColor();
-
-  M5.Display.fillRect(0, contentTop, width, contentHeight, TFT_BLACK);
-
   for (int slot = 0; slot < kTilesPerPage; ++slot) {
     const std::size_t tileIndex = first + slot;
     if (!config_ || tileIndex >= config_->tiles.size()) continue;
-
-    const auto& tile = config_->tiles[tileIndex];
-    const int col = slot % kColumns;
-    const int row = slot / kColumns;
-    const int x = col * tileW;
-    const int y = contentTop + row * tileH;
-    const int centerX = x + tileW / 2;
-    const bool activeText = tile.switchCount() > 0 && tile.anySwitchOn();
-    const auto textColor = activeText ? originalActiveColor() : TFT_WHITE;
-
-    if (tile.type == model::TileType::Sensor && !tile.items.empty() &&
-        tile.items.front().type == model::TileItemType::Sensor) {
-      const auto& sensor = tile.items.front().sensorDevice;
-      const bool combined = sensor.type == model::SensorType::CombinedValues;
-      const int valueY = combined ? y + 20 : y + tileH / 2 - 20;
-      const int iconX = centerX - 34;
-      String firstIconPath;
-      if (!sensor.firstIcon.isEmpty()) {
-        firstIconPath = "/";
-        firstIconPath += sensor.firstIcon;
-        firstIconPath += ".jpg";
-      }
-      if (!drawJpgAsset(firstIconPath, iconX, valueY - 4)) {
-        drawNamedIcon("", model::TileType::Sensor, iconX + 12, valueY + 8, TFT_WHITE, false);
-      }
-      M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-      M5.Display.setTextSize(2);
-      M5.Display.setCursor(centerX - 5, valueY);
-      M5.Display.print(truncate(sensor.firstValue, 7));
-
-      if (combined) {
-        const int secondY = valueY + 30;
-        String secondIconPath = firstIconPath;
-        if (!sensor.secondIcon.isEmpty()) {
-          secondIconPath = "/";
-          secondIconPath += sensor.secondIcon;
-          secondIconPath += ".jpg";
-        }
-        if (!drawJpgAsset(secondIconPath, iconX, secondY - 4)) {
-          drawNamedIcon("", model::TileType::Sensor, iconX + 12, secondY + 8, TFT_WHITE, false);
-        }
-        M5.Display.setCursor(centerX - 5, secondY);
-        M5.Display.print(truncate(sensor.secondValue, 7));
-      }
-    } else {
-      drawUserTileIcon(tile, centerX, y + 47, textColor);
-    }
-
-    drawCenteredText(truncate(tile.name, 15), centerX, userTileCaptionY(y, tileH), textColor);
-
-    if (tile.type == model::TileType::Scene && tile.items.size() > 1) {
-      M5.Display.setTextColor(textColor, TFT_BLACK);
-      M5.Display.setTextSize(1);
-      M5.Display.setCursor(x + tileW - 19, y + 10);
-      M5.Display.print("...");
-    }
+    drawHomeTileUser(tileIndex);
   }
-
-  for (int col = 1; col < kColumns; ++col) {
-    M5.Display.drawFastVLine(col * tileW, contentTop, contentHeight, grid);
-  }
-  M5.Display.drawFastHLine(0, contentTop + tileH, width, grid);
-
+  drawHomeUserGrid();
   if (footerVisible()) drawFooter();
+}
+
+void CompatUi::drawHomeTileUser(std::size_t tileIndex) {
+  if (!config_ || tileIndex >= config_->tiles.size()) return;
+  const std::size_t first = homePage_ * kTilesPerPage;
+  if (tileIndex < first || tileIndex >= first + kTilesPerPage) return;
+
+  const int slot = static_cast<int>(tileIndex - first);
+  const int width = M5.Display.width();
+  const int height = M5.Display.height();
+  const int footerHeight = footerVisible() ? kFooterHeight : 0;
+  const int contentTop = kUserStatusHeight;
+  const int contentHeight = height - contentTop - footerHeight;
+  const int col = slot % kColumns;
+  const int row = slot / kColumns;
+  const int x = gridStart(width, col, kColumns);
+  const int x1 = gridEnd(width, col, kColumns);
+  const int y = contentTop + gridStart(contentHeight, row, kRows);
+  const int y1 = contentTop + gridEnd(contentHeight, row, kRows);
+  const int tileW = x1 - x;
+  const int tileH = y1 - y;
+  const int centerX = x + tileW / 2;
+  const auto& tile = config_->tiles[tileIndex];
+  const bool activeText = tile.switchCount() > 0 && tile.anySwitchOn();
+  const auto textColor = activeText ? originalActiveColor() : TFT_WHITE;
+
+  M5.Display.fillRect(x, y, tileW, tileH, TFT_BLACK);
+
+  if (tile.type == model::TileType::Sensor && !tile.items.empty() &&
+      tile.items.front().type == model::TileItemType::Sensor) {
+    const auto& sensor = tile.items.front().sensorDevice;
+    const bool combined = sensor.type == model::SensorType::CombinedValues;
+    const int valueY = combined ? y + 20 : y + tileH / 2 - 20;
+    const int iconX = centerX - 34;
+    String firstIconPath;
+    if (!sensor.firstIcon.isEmpty()) {
+      firstIconPath = "/";
+      firstIconPath += sensor.firstIcon;
+      firstIconPath += ".jpg";
+    }
+    if (!drawJpgAsset(firstIconPath, iconX, valueY - 4)) {
+      drawNamedIcon("", model::TileType::Sensor, iconX + 12, valueY + 8, TFT_WHITE, false);
+    }
+    M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+    M5.Display.setTextSize(2);
+    M5.Display.setCursor(centerX - 5, valueY);
+    M5.Display.print(truncate(sensor.firstValue, 7));
+
+    if (combined) {
+      const int secondY = valueY + 30;
+      String secondIconPath = firstIconPath;
+      if (!sensor.secondIcon.isEmpty()) {
+        secondIconPath = "/";
+        secondIconPath += sensor.secondIcon;
+        secondIconPath += ".jpg";
+      }
+      if (!drawJpgAsset(secondIconPath, iconX, secondY - 4)) {
+        drawNamedIcon("", model::TileType::Sensor, iconX + 12, secondY + 8, TFT_WHITE, false);
+      }
+      M5.Display.setCursor(centerX - 5, secondY);
+      M5.Display.print(truncate(sensor.secondValue, 7));
+    }
+  } else {
+    drawUserTileIcon(tile, centerX, y + 47, textColor);
+  }
+
+  drawCenteredText(truncate(tile.name, 15), centerX, userTileCaptionY(y, tileH), textColor);
+  if (tile.type == model::TileType::Scene && tile.items.size() > 1) {
+    M5.Display.setTextColor(textColor, TFT_BLACK);
+    M5.Display.setTextSize(1);
+    M5.Display.setCursor(x + tileW - 19, y + 10);
+    M5.Display.print("...");
+  }
+}
+
+void CompatUi::drawHomeUserGrid() {
+  const int width = M5.Display.width();
+  const int height = M5.Display.height();
+  const int footerHeight = footerVisible() ? kFooterHeight : 0;
+  const int contentTop = kUserStatusHeight;
+  const int contentHeight = height - contentTop - footerHeight;
+  const auto grid = originalGridColor();
+  for (int col = 1; col < kColumns; ++col) {
+    M5.Display.drawFastVLine(gridStart(width, col, kColumns), contentTop, contentHeight, grid);
+  }
+  M5.Display.drawFastHLine(
+      0,
+      contentTop + gridStart(contentHeight, 1, kRows),
+      width,
+      grid);
+}
+
+void CompatUi::drawDirtyHomeTiles() {
+  bool redrewUserTile = false;
+  for (std::size_t tileIndex = 0; tileIndex < homeTileDirty_.size(); ++tileIndex) {
+    if (!homeTileDirty_[tileIndex]) continue;
+    homeTileDirty_[tileIndex] = false;
+    if (debugMode_) {
+      drawHomeTileDebug(tileIndex);
+    } else {
+      drawHomeTileUser(tileIndex);
+      redrewUserTile = true;
+    }
+  }
+  if (redrewUserTile) drawHomeUserGrid();
 }
 
 void CompatUi::drawTileDetail() {
   if (!config_ || selectedTile_ >= config_->tiles.size()) {
     screen_ = Screen::Home;
-    dirty_ = true;
+    markNavigationDirty();
     return;
   }
 
@@ -528,47 +826,56 @@ void CompatUi::drawTileDetail() {
 
 void CompatUi::drawTileDetailDebug() {
   auto& tile = config_->tiles[selectedTile_];
-  const int width = M5.Display.width();
-
   M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(5, kDebugStatusHeight + 6);
   M5.Display.print(truncate(tile.name, 28));
 
-  constexpr int firstY = kDebugStatusHeight + 28;
-  constexpr int rowHeight = 42;
-
   for (int row = 0; row < kDebugDetailItemsPerPage; ++row) {
     const std::size_t idx = detailPage_ * kDebugDetailItemsPerPage + row;
     if (idx >= tile.items.size()) break;
-    const int y = firstY + row * rowHeight;
-    auto& item = tile.items[idx];
+    drawDetailItemDebug(idx);
+  }
+  drawFooter();
+}
 
-    if (item.type == model::TileItemType::Switch) {
-      auto& d = item.switchDevice;
-      const auto fill = d.active ? TFT_DARKGREEN : TFT_DARKGREY;
-      M5.Display.fillRect(5, y, width - 10, rowHeight - 4, fill);
-      M5.Display.setTextColor(TFT_WHITE, fill);
-      M5.Display.setCursor(10, y + 7);
-      M5.Display.print(truncate(d.name, 28));
-      M5.Display.setCursor(width - 50, y + 7);
-      M5.Display.print(d.active ? "ON" : "OFF");
-    } else {
-      auto& d = item.sensorDevice;
-      M5.Display.fillRect(5, y, width - 10, rowHeight - 4, TFT_NAVY);
-      M5.Display.setTextColor(TFT_WHITE, TFT_NAVY);
-      M5.Display.setCursor(10, y + 6);
-      M5.Display.print(truncate(d.name, 24));
-      M5.Display.setCursor(10, y + 20);
-      M5.Display.print(truncate(d.firstValue, 16));
-      if (d.type == model::SensorType::CombinedValues) {
-        M5.Display.print(" / ");
-        M5.Display.print(truncate(d.secondValue, 12));
-      }
+void CompatUi::drawDetailItemDebug(std::size_t itemIndex) {
+  if (!config_ || selectedTile_ >= config_->tiles.size()) return;
+  auto& tile = config_->tiles[selectedTile_];
+  if (itemIndex >= tile.items.size()) return;
+  const std::size_t first = detailPage_ * kDebugDetailItemsPerPage;
+  if (itemIndex < first || itemIndex >= first + kDebugDetailItemsPerPage) return;
+
+  constexpr int firstY = kDebugStatusHeight + 28;
+  constexpr int rowHeight = 42;
+  const int row = static_cast<int>(itemIndex - first);
+  const int y = firstY + row * rowHeight;
+  const int width = M5.Display.width();
+  auto& item = tile.items[itemIndex];
+
+  M5.Display.fillRect(0, y, width, rowHeight, TFT_BLACK);
+  if (item.type == model::TileItemType::Switch) {
+    auto& d = item.switchDevice;
+    const auto fill = d.active ? TFT_DARKGREEN : TFT_DARKGREY;
+    M5.Display.fillRect(5, y, width - 10, rowHeight - 4, fill);
+    M5.Display.setTextColor(TFT_WHITE, fill);
+    M5.Display.setCursor(10, y + 7);
+    M5.Display.print(truncate(d.name, 28));
+    M5.Display.setCursor(width - 50, y + 7);
+    M5.Display.print(d.active ? "ON" : "OFF");
+  } else {
+    auto& d = item.sensorDevice;
+    M5.Display.fillRect(5, y, width - 10, rowHeight - 4, TFT_NAVY);
+    M5.Display.setTextColor(TFT_WHITE, TFT_NAVY);
+    M5.Display.setCursor(10, y + 6);
+    M5.Display.print(truncate(d.name, 24));
+    M5.Display.setCursor(10, y + 20);
+    M5.Display.print(truncate(d.firstValue, 16));
+    if (d.type == model::SensorType::CombinedValues) {
+      M5.Display.print(" / ");
+      M5.Display.print(truncate(d.secondValue, 12));
     }
   }
-
-  drawFooter();
 }
 
 void CompatUi::drawTileDetailUser() {
@@ -576,17 +883,40 @@ void CompatUi::drawTileDetailUser() {
   const int width = M5.Display.width();
   const int height = M5.Display.height();
   const int contentTop = kUserStatusHeight;
-  const int contentBottom = height - kFooterHeight;
-  const int contentHeight = contentBottom - contentTop;
-  const auto grid = originalGridColor();
-
+  const int contentHeight = height - contentTop - kFooterHeight;
   M5.Display.fillRect(0, contentTop, width, contentHeight, TFT_BLACK);
 
   if (tile.items.size() == 1 && tile.type != model::TileType::Scene) {
-    const auto& item = tile.items.front();
+    drawDetailItemUser(0);
+    drawFooter();
+    return;
+  }
+
+  const std::size_t first = detailPage_ * kUserDetailItemsPerPage;
+  for (int slot = 0; slot < kUserDetailItemsPerPage; ++slot) {
+    const std::size_t idx = first + slot;
+    if (idx >= tile.items.size()) continue;
+    drawDetailItemUser(idx);
+  }
+  drawDetailUserGrid();
+  drawFooter();
+}
+
+void CompatUi::drawDetailItemUser(std::size_t itemIndex) {
+  if (!config_ || selectedTile_ >= config_->tiles.size()) return;
+  const auto& tile = config_->tiles[selectedTile_];
+  if (itemIndex >= tile.items.size()) return;
+
+  const int width = M5.Display.width();
+  const int height = M5.Display.height();
+  const int contentTop = kUserStatusHeight;
+  const int contentHeight = height - contentTop - kFooterHeight;
+  const auto& item = tile.items[itemIndex];
+
+  if (tile.items.size() == 1 && tile.type != model::TileType::Scene) {
+    M5.Display.fillRect(0, contentTop, width, contentHeight, TFT_BLACK);
     const int centerX = width / 2;
     const int centerY = contentTop + contentHeight / 2 - 12;
-
     if (item.type == model::TileItemType::Switch) {
       const auto color = item.switchDevice.active ? originalActiveColor() : TFT_WHITE;
       drawUserItemIcon(item, centerX, centerY - 20, color, tile.icon);
@@ -607,42 +937,66 @@ void CompatUi::drawTileDetailUser() {
       }
       drawCenteredText(truncate(sensor.name, 28), centerX, centerY + 54, TFT_WHITE);
     }
-
-    drawFooter();
     return;
   }
 
-  const int tileW = width / kColumns;
-  const int tileH = contentHeight / kRows;
   const std::size_t first = detailPage_ * kUserDetailItemsPerPage;
+  if (itemIndex < first || itemIndex >= first + kUserDetailItemsPerPage) return;
+  const int slot = static_cast<int>(itemIndex - first);
+  const int col = slot % kColumns;
+  const int row = slot / kColumns;
+  const int x = gridStart(width, col, kColumns);
+  const int x1 = gridEnd(width, col, kColumns);
+  const int y = contentTop + gridStart(contentHeight, row, kRows);
+  const int y1 = contentTop + gridEnd(contentHeight, row, kRows);
+  const int tileW = x1 - x;
+  const int tileH = y1 - y;
+  const int centerX = x + tileW / 2;
 
-  for (int slot = 0; slot < kUserDetailItemsPerPage; ++slot) {
-    const std::size_t idx = first + slot;
-    if (idx >= tile.items.size()) continue;
-    const auto& item = tile.items[idx];
-    const int col = slot % kColumns;
-    const int row = slot / kColumns;
-    const int x = col * tileW;
-    const int y = contentTop + row * tileH;
-    const int centerX = x + tileW / 2;
-
-    std::uint16_t color = TFT_WHITE;
-    if (item.type == model::TileItemType::Switch && item.switchDevice.active) {
-      color = originalActiveColor();
-    }
-
-    drawUserItemIcon(item, centerX, y + 46, color, tile.icon);
-    const String label = item.type == model::TileItemType::Switch
-        ? item.switchDevice.name
-        : item.sensorDevice.name;
-    drawCenteredText(truncate(label, 15), centerX, userTileCaptionY(y, tileH), color);
+  M5.Display.fillRect(x, y, tileW, tileH, TFT_BLACK);
+  std::uint16_t color = TFT_WHITE;
+  if (item.type == model::TileItemType::Switch && item.switchDevice.active) {
+    color = originalActiveColor();
   }
+  drawUserItemIcon(item, centerX, y + 46, color, tile.icon);
+  const String label = item.type == model::TileItemType::Switch
+      ? item.switchDevice.name
+      : item.sensorDevice.name;
+  drawCenteredText(truncate(label, 15), centerX, userTileCaptionY(y, tileH), color);
+}
 
+void CompatUi::drawDetailUserGrid() {
+  const int width = M5.Display.width();
+  const int height = M5.Display.height();
+  const int contentTop = kUserStatusHeight;
+  const int contentHeight = height - contentTop - kFooterHeight;
+  const auto grid = originalGridColor();
   for (int col = 1; col < kColumns; ++col) {
-    M5.Display.drawFastVLine(col * tileW, contentTop, contentHeight, grid);
+    M5.Display.drawFastVLine(gridStart(width, col, kColumns), contentTop, contentHeight, grid);
   }
-  M5.Display.drawFastHLine(0, contentTop + tileH, width, grid);
-  drawFooter();
+  M5.Display.drawFastHLine(
+      0,
+      contentTop + gridStart(contentHeight, 1, kRows),
+      width,
+      grid);
+}
+
+void CompatUi::drawDirtyDetailItems() {
+  bool redrewGridItem = false;
+  for (std::size_t itemIndex = 0; itemIndex < detailItemDirty_.size(); ++itemIndex) {
+    if (!detailItemDirty_[itemIndex]) continue;
+    detailItemDirty_[itemIndex] = false;
+    if (debugMode_) {
+      drawDetailItemDebug(itemIndex);
+    } else {
+      drawDetailItemUser(itemIndex);
+      if (config_ && selectedTile_ < config_->tiles.size()) {
+        const auto& tile = config_->tiles[selectedTile_];
+        redrewGridItem = !(tile.items.size() == 1 && tile.type != model::TileType::Scene);
+      }
+    }
+  }
+  if (redrewGridItem) drawDetailUserGrid();
 }
 
 void CompatUi::drawFooter() {
@@ -962,10 +1316,8 @@ bool CompatUi::hitTestHomeTile(
   }
 
   const int contentHeight = height - top - footerHeight;
-  const int tileW = width / kColumns;
-  const int tileH = contentHeight / kRows;
-  const int col = min(kColumns - 1, max(0, x / tileW));
-  const int row = min(kRows - 1, max(0, (y - top) / tileH));
+  const int col = gridIndex(x, width, kColumns);
+  const int row = gridIndex(y - top, contentHeight, kRows);
   const int slot = row * kColumns + col;
 
   tileIndex = homePage_ * kTilesPerPage + slot;
@@ -1012,7 +1364,9 @@ void CompatUi::executeTileAction(
       break;
   }
 
-  dirty_ = true;
+  if (action == core::TileAction::OpenDetail) {
+    applyChange(core::UiChange::navigation());
+  }
 }
 
 void CompatUi::handleDetailTouch(int x, int y) {
@@ -1048,7 +1402,6 @@ void CompatUi::handleDetailTouchDebug(int x, int y) {
 
   auto& device = item.switchDevice;
   mqtt_->switchTileItem(tile.id, item.id, !device.active);
-  dirty_ = true;
 }
 
 void CompatUi::handleDetailTouchUser(int x, int y) {
@@ -1067,16 +1420,13 @@ void CompatUi::handleDetailTouchUser(int x, int y) {
     auto& item = tile.items.front();
     if (item.type == model::TileItemType::Switch) {
       mqtt_->switchTileItem(tile.id, item.id, !item.switchDevice.active);
-      dirty_ = true;
     }
     return;
   }
 
   const int contentHeight = height - kUserStatusHeight - kFooterHeight;
-  const int tileW = width / kColumns;
-  const int tileH = contentHeight / kRows;
-  const int col = min(kColumns - 1, max(0, x / tileW));
-  const int row = min(kRows - 1, max(0, (y - kUserStatusHeight) / tileH));
+  const int col = gridIndex(x, width, kColumns);
+  const int row = gridIndex(y - kUserStatusHeight, contentHeight, kRows);
   const int slot = row * kColumns + col;
   const std::size_t idx = detailPage_ * kUserDetailItemsPerPage + slot;
   if (idx >= tile.items.size()) return;
@@ -1084,7 +1434,6 @@ void CompatUi::handleDetailTouchUser(int x, int y) {
   auto& item = tile.items[idx];
   if (item.type != model::TileItemType::Switch) return;
   mqtt_->switchTileItem(tile.id, item.id, !item.switchDevice.active);
-  dirty_ = true;
 }
 
 void CompatUi::handleFooterTouch(int x) {
@@ -1189,7 +1538,7 @@ void CompatUi::executeFooterAction(FooterAction action) {
   }
 
   Serial.printf("[UI] footer action: %s\n", footerActionLabel(action));
-  dirty_ = true;
+  applyChange(core::UiChange::navigation());
 }
 
 const char* CompatUi::footerActionLabel(FooterAction action) {
@@ -1205,12 +1554,12 @@ const char* CompatUi::footerActionLabel(FooterAction action) {
 
 void CompatUi::showMessage(const String& message) {
   message_ = message;
-  dirty_ = true;
+  applyChange(core::UiChange::message());
 }
 
 void CompatUi::clearMessage() {
   message_ = "";
-  dirty_ = true;
+  applyChange(core::UiChange::message());
 }
 
 String CompatUi::truncate(const String& value, std::size_t maxChars) {
