@@ -1,0 +1,8 @@
+.pio/
+.vscode/
+.idea/
+*.swp
+*.swo
+*.patch
+.DS_Store
+data/config.json

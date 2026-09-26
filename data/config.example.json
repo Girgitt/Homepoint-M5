@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 2,
+
+  "mqttbroker": "mqtt://192.168.1.2:1883",
+  "mqttusername": "mqttusername",
+  "mqttpasswd": "mymqttpassword",
+  "timezone": "CET-1CEST-2,M3.5.0/02:00:00,M10.5.0/03:00:00",
+
+  "ui": {
+    "longPressMs": 600
+  },
+
+  "screenSaverMinutes": 10,
+  "screenSaverPowerSaveEnabled": true,
+  "powerFrom5vRailNotUsb": true,
+  "screenRotationAngle": 1,
+  "displayColorInverted": false,
+
+  "tiles": [
+    {
+      "id": "desk-lamp",
+      "type": "switch",
+      "name": "Desk Lamp",
+      "setTopic": "lights/desk/set",
+      "getTopic": "lights/desk/state",
+      "onValue": "true",
+      "offValue": "false",
+      "icon": "lamp"
+    },
+    {
+      "id": "bedroom-temperature",
+      "type": "sensor",
+      "name": "Bedroom",
+      "getTopic": "bedroom/esptemp",
+      "jsondata": true,
+      "sensorType": "singleValue",
+      "firstKey": "temperature",
+      "firstIcon": "temperature_small",
+      "icon": "bedroom"
+    },
+    {
+      "id": "living-room",
+      "type": "scene",
+      "name": "Living Room",
+      "icon": "livingroom",
+      "items": [
+        {
+          "type": "switch",
+          "name": "Ceiling",
+          "setTopic": "lights/living/ceiling/set",
+          "getTopic": "lights/living/ceiling/state",
+          "onValue": "true",
+          "offValue": "false"
+        },
+        {
+          "type": "switch",
+          "name": "Floor Lamp",
+          "setTopic": "lights/living/floor/set",
+          "getTopic": "lights/living/floor/state",
+          "onValue": "true",
+          "offValue": "false"
+        }
+      ]
+    }
+  ]
+}
