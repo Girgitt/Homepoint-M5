@@ -1222,12 +1222,13 @@ void CompatUi::drawFooterDebug() {
   const int width = M5.Display.width();
   const int height = M5.Display.height();
   const int y = height - kFooterHeight;
-  const int slotW = width / 3;
 
   M5.Display.fillRect(0, y, width, kFooterHeight, TFT_BLACK);
   M5.Display.drawFastHLine(0, y, width, TFT_DARKGREY);
-  M5.Display.drawFastVLine(slotW, y, kFooterHeight, TFT_DARKGREY);
-  M5.Display.drawFastVLine(slotW * 2, y, kFooterHeight, TFT_DARKGREY);
+  for (int col = 1; col < kColumns; ++col) {
+    M5.Display.drawFastVLine(
+        gridStart(width, col, kColumns), y, kFooterHeight, TFT_DARKGREY);
+  }
   M5.Display.setTextSize(1);
 
   const FooterSlot slots[] = {
@@ -1240,8 +1241,8 @@ void CompatUi::drawFooterDebug() {
     const auto action = footerActionForSlot(slots[index]);
     const bool enabled = footerActionEnabled(action);
     const char* label = footerActionLabel(action);
-    const int x0 = index * slotW;
-    const int x1 = index == 2 ? width : x0 + slotW;
+    const int x0 = gridStart(width, index, kColumns);
+    const int x1 = gridEnd(width, index, kColumns);
     const int labelWidth = M5.Display.textWidth(label);
     const int textX = x0 + ((x1 - x0) - labelWidth) / 2;
     const int textY = y + (kFooterHeight - 8) / 2;
@@ -1256,21 +1257,23 @@ void CompatUi::drawFooterUser() {
   const int width = M5.Display.width();
   const int height = M5.Display.height();
   const int y = height - kFooterHeight;
-  const int slotW = width / 3;
   const auto grid = originalGridColor();
 
   M5.Display.fillRect(0, y, width, kFooterHeight, TFT_BLACK);
   M5.Display.drawFastHLine(0, y, width, grid);
-  M5.Display.drawFastVLine(slotW, y, kFooterHeight, grid);
-  M5.Display.drawFastVLine(slotW * 2, y, kFooterHeight, grid);
+  for (int col = 1; col < kColumns; ++col) {
+    M5.Display.drawFastVLine(gridStart(width, col, kColumns), y, kFooterHeight, grid);
+  }
 
   const FooterSlot slots[] = {FooterSlot::Left, FooterSlot::Center, FooterSlot::Right};
   for (int index = 0; index < 3; ++index) {
     const auto action = footerActionForSlot(slots[index]);
     const bool enabled = footerActionEnabled(action);
+    const int x0 = gridStart(width, index, kColumns);
+    const int x1 = gridEnd(width, index, kColumns);
     drawFooterSymbol(
         action,
-        index * slotW + slotW / 2,
+        x0 + (x1 - x0) / 2,
         y + kFooterHeight / 2,
         enabled ? TFT_WHITE : grid);
   }
@@ -1715,8 +1718,8 @@ void CompatUi::handleFooterTouch(int x) {
 
 CompatUi::FooterSlot CompatUi::footerSlotForX(int x) const {
   const int width = M5.Display.width();
-  if (x < width / 3) return FooterSlot::Left;
-  if (x < (width * 2) / 3) return FooterSlot::Center;
+  if (x < gridStart(width, 1, kColumns)) return FooterSlot::Left;
+  if (x < gridStart(width, 2, kColumns)) return FooterSlot::Center;
   return FooterSlot::Right;
 }
 
