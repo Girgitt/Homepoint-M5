@@ -32,6 +32,11 @@ void App::setup() {
   M5.Display.setCursor(8, 8);
   M5.Display.println("Homepoint-M5 bootstrap");
 
+  const bool timingReady = timing_.begin();
+  if (!timingReady) {
+    Serial.println("[BOOT] timing service unavailable; using UI polling fallbacks");
+  }
+
   const bool persistentReady = persistentStore_.begin();
   auto loadResult = config::PersistentLoadResult::IoError;
   if (persistentReady) {
@@ -101,7 +106,12 @@ void App::setup() {
         mqttStatusPending_.store(true, std::memory_order_relaxed);
       });
 
-  ui_.begin(&config_, &wifi_, &mqtt_, bootstrap_.debugUi);
+  ui_.begin(
+      &config_,
+      &wifi_,
+      &mqtt_,
+      bootstrap_.debugUi,
+      timingReady ? &timing_ : nullptr);
   if (!bootstrap_.configured) {
     ui_.showMessage("Setup AP: HomePoint-Config\nOpen 192.168.99.1");
   } else if (!configValid_) {

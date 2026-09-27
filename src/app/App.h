@@ -8,6 +8,7 @@
 #include "../model/Model.h"
 #include "../network/MqttManager.h"
 #include "../network/WifiManager.h"
+#include "../system/EspDeadlineScheduler.h"
 #include "../ui/CompatUi.h"
 #include "../web/WebPortal.h"
 
@@ -27,6 +28,7 @@ class App {
   network::WifiManager wifi_;
   network::MqttManager mqtt_;
   web::WebPortal web_;
+  homepoint::system::EspDeadlineScheduler timing_;
   ui::CompatUi ui_;
 
   bool configValid_ = false;

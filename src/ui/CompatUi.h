@@ -2,13 +2,17 @@
 
 #include <Arduino.h>
 #include <M5Unified.h>
+#include <atomic>
 #include <vector>
 
+#include "DeadlineScheduler.h"
+#include "HapticFeedback.h"
 #include "PressGesture.h"
 #include "ScreenPowerFsm.h"
 #include "StatusCenterCycle.h"
 #include "TileInteraction.h"
 #include "UiChange.h"
+#include "../hardware/M5HapticMotor.h"
 #include "../model/Model.h"
 #include "../network/MqttManager.h"
 #include "../network/WifiManager.h"
@@ -21,7 +25,8 @@ class CompatUi {
       model::AppConfig* config,
       network::WifiManager* wifi,
       network::MqttManager* mqtt,
-      bool debugMode);
+      bool debugMode,
+      core::DeadlineScheduler* timing);
 
   void setConfig(model::AppConfig* config);
   void setDebugMode(bool enabled);
@@ -79,14 +84,24 @@ class CompatUi {
 
   core::ScreenPowerFsm screenPowerFsm_;
   core::PressGestureClassifier tilePressGesture_;
+  core::HapticFeedback hapticFeedback_;  // polling fallback if timing service is unavailable
+  hardware::M5HapticMotor hapticMotor_;
+  core::DeadlineScheduler* timing_ = nullptr;
+  core::DeadlineHandle hapticOnDeadline_ = core::kInvalidDeadlineHandle;
+  core::DeadlineHandle hapticOffDeadline_ = core::kInvalidDeadlineHandle;
+  core::DeadlineHandle screenTimeoutDeadline_ = core::kInvalidDeadlineHandle;
+  core::DeadlineHandle statusCenterDeadline_ = core::kInvalidDeadlineHandle;
+  std::atomic<bool> screenTimeoutPending_{false};
+  std::atomic<bool> statusCenterDeadlinePending_{false};
   core::StatusCenterCycle statusCenterCycle_;
   bool homeTilePressActive_ = false;
   std::size_t homeTilePressTile_ = 0;
   int homeTilePressStartX_ = 0;
   int homeTilePressStartY_ = 0;
   String message_;
-  std::uint32_t lastInteractionAt_ = 0;
+  std::uint32_t lastInteractionAt_ = 0;  // fallback only; normal timeout uses DeadlineScheduler
   int lastClockMinute_ = -1;
+  bool lastTimeAvailable_ = false;
   bool visualStatusSnapshotReady_ = false;
   bool lastWifiOnline_ = false;
   bool lastMqttOnline_ = false;
@@ -101,6 +116,15 @@ class CompatUi {
   void ensureDirtyStorage();
   void markVisibleModelItemDirty(std::size_t tileIndex, std::size_t itemIndex);
   void updateTimedStatusInvalidation(std::uint32_t now);
+  void resetStatusCenterCycle(std::uint32_t now);
+  void scheduleStatusCenterDeadline();
+  void armScreenTimeout();
+  void cancelScreenTimeout();
+  void registerTimingCallbacks();
+  static void hapticOnDeadlineCallback(void* context);
+  static void hapticOffDeadlineCallback(void* context);
+  static void screenTimeoutDeadlineCallback(void* context);
+  static void statusCenterDeadlineCallback(void* context);
   void markNavigationDirty();
 
   void drawStatusBar();
@@ -155,6 +179,9 @@ class CompatUi {
   void updateHomeTilePress(const m5::touch_detail_t& touch, std::uint32_t now);
   void dispatchHomeTileGesture(core::PressGesture gesture);
   void resetHomeTilePress();
+  void triggerHaptic(core::HapticCue cue, std::uint32_t now);
+  void updateHaptics(std::uint32_t now);
+  void stopHaptics();
   bool hitTestHomeTile(int x, int y, std::size_t& tileIndex) const;
   core::TileBehavior tileBehaviorForTile(const model::Tile& tile) const;
   void executeTileAction(
@@ -164,7 +191,8 @@ class CompatUi {
 
   int statusHeight() const;
   std::size_t detailItemsPerPage() const;
-  bool screenTimeoutExpired(std::uint32_t now) const;
+  bool fallbackScreenTimeoutExpired(std::uint32_t now) const;
+  void noteUserActivity(std::uint32_t now);
   void setDisplayPowered(bool powered);
 
   static String truncate(const String& value, std::size_t maxChars);

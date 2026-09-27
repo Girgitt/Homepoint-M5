@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <ctime>
 #include <algorithm>
+#include <limits>
 
 namespace homepoint::ui {
 namespace {
@@ -120,13 +121,16 @@ void CompatUi::begin(
     model::AppConfig* config,
     network::WifiManager* wifi,
     network::MqttManager* mqtt,
-    bool debugMode) {
+    bool debugMode,
+    core::DeadlineScheduler* timing) {
   config_ = config;
   wifi_ = wifi;
   mqtt_ = mqtt;
   debugMode_ = debugMode;
-  lastInteractionAt_ = millis();
-  statusCenterCycle_.reset(lastInteractionAt_);
+  timing_ = timing;
+  registerTimingCallbacks();
+  const auto now = millis();
+  resetStatusCenterCycle(now);
   lastWifiOnline_ = wifi_ && wifi_->stationConnected();
   lastMqttOnline_ = mqtt_ && mqtt_->state() == network::MqttState::Connected;
   lastIpAddress_ = wifi_ ? wifi_->ipAddress() : String();
@@ -138,6 +142,8 @@ void CompatUi::begin(
   M5.Display.invertDisplay(config_ ? config_->hardware.displayColorInverted : false);
   M5.Display.setBrightness(96);
   M5.Display.setTextWrap(false);
+  stopHaptics();
+  noteUserActivity(now);
   Serial.printf(
       "[UI] mode=%s long-press=%lu ms\n",
       debugMode_ ? "debug" : "user",
@@ -153,6 +159,7 @@ void CompatUi::setConfig(model::AppConfig* config) {
   homePage_ = 0;
   detailPage_ = 0;
   resetHomeTilePress();
+  stopHaptics();
   ensureDirtyStorage();
 
   if (config_) {
@@ -163,10 +170,11 @@ void CompatUi::setConfig(model::AppConfig* config) {
         static_cast<unsigned long>(config_->ui.longPressMs));
   }
   screenPowerFsm_.forceAwake();
-  lastInteractionAt_ = millis();
-  statusCenterCycle_.reset(lastInteractionAt_);
+  const auto now = millis();
+  resetStatusCenterCycle(now);
   lastClockMinute_ = -1;
   setDisplayPowered(true);
+  noteUserActivity(now);
   applyChange(core::UiChange::full());
 }
 
@@ -177,7 +185,8 @@ void CompatUi::setDebugMode(bool enabled) {
   homePage_ = 0;
   detailPage_ = 0;
   resetHomeTilePress();
-  statusCenterCycle_.reset(millis());
+  stopHaptics();
+  resetStatusCenterCycle(millis());
   lastClockMinute_ = -1;
   lastWifiOnline_ = wifi_ && wifi_->stationConnected();
   lastMqttOnline_ = mqtt_ && mqtt_->state() == network::MqttState::Connected;
@@ -206,14 +215,16 @@ void CompatUi::applyChange(const core::UiChange& change) {
       const bool online = wifi_->stationConnected();
       const String ip = wifi_->ipAddress();
       const String status = wifi_->statusText();
-      if (online != lastWifiOnline_) statusLeftDirty_ = true;
-      if (online != lastWifiOnline_ || ip != lastIpAddress_ ||
+      const bool availabilityChanged = online != lastWifiOnline_;
+      if (availabilityChanged) statusLeftDirty_ = true;
+      if (availabilityChanged || ip != lastIpAddress_ ||
           status != lastWifiStatusText_) {
         statusCenterDirty_ = true;
       }
       lastWifiOnline_ = online;
       lastIpAddress_ = ip;
       lastWifiStatusText_ = status;
+      if (availabilityChanged) resetStatusCenterCycle(millis());
       return;
     }
 
@@ -289,7 +300,7 @@ void CompatUi::markNavigationDirty() {
   contentDirty_ = true;
   footerDirty_ = true;
   statusCenterDirty_ = true;
-  statusCenterCycle_.reset(millis());
+  resetStatusCenterCycle(millis());
   lastClockMinute_ = -1;
 }
 
@@ -318,19 +329,160 @@ void CompatUi::clearPendingInvalidations() {
   std::fill(detailItemDirty_.begin(), detailItemDirty_.end(), false);
 }
 
-void CompatUi::updateTimedStatusInvalidation(std::uint32_t now) {
-  if (screen_ != Screen::Home) return;
+void CompatUi::registerTimingCallbacks() {
+  if (!timing_) return;
 
-  std::time_t wallNow = std::time(nullptr);
+  hapticOnDeadline_ = timing_->registerCallback(
+      &CompatUi::hapticOnDeadlineCallback, this);
+  hapticOffDeadline_ = timing_->registerCallback(
+      &CompatUi::hapticOffDeadlineCallback, this);
+  screenTimeoutDeadline_ = timing_->registerCallback(
+      &CompatUi::screenTimeoutDeadlineCallback, this);
+  statusCenterDeadline_ = timing_->registerCallback(
+      &CompatUi::statusCenterDeadlineCallback, this);
+
+  if (hapticOnDeadline_ == core::kInvalidDeadlineHandle ||
+      hapticOffDeadline_ == core::kInvalidDeadlineHandle ||
+      screenTimeoutDeadline_ == core::kInvalidDeadlineHandle ||
+      statusCenterDeadline_ == core::kInvalidDeadlineHandle) {
+    Serial.println("[TIMING] UI could not reserve all deadline slots; polling fallback may be used");
+  }
+}
+
+void CompatUi::hapticOnDeadlineCallback(void* context) {
+  auto* ui = static_cast<CompatUi*>(context);
+  ui->hapticMotor_.apply({true, core::HapticFeedback::kMotorLevel});
+}
+
+void CompatUi::hapticOffDeadlineCallback(void* context) {
+  static_cast<CompatUi*>(context)->hapticMotor_.stop();
+}
+
+void CompatUi::screenTimeoutDeadlineCallback(void* context) {
+  static_cast<CompatUi*>(context)->screenTimeoutPending_.store(
+      true, std::memory_order_release);
+}
+
+void CompatUi::statusCenterDeadlineCallback(void* context) {
+  static_cast<CompatUi*>(context)->statusCenterDeadlinePending_.store(
+      true, std::memory_order_release);
+}
+
+void CompatUi::resetStatusCenterCycle(std::uint32_t now) {
+  statusCenterCycle_.reset(now);
+
+  const std::time_t wallNow = std::time(nullptr);
   const bool haveTime = wallNow > 100000;
   const bool haveIp = wifi_ && wifi_->stationConnected();
+  lastTimeAvailable_ = haveTime;
+  statusCenterCycle_.update(now, haveTime, haveIp);
+  scheduleStatusCenterDeadline();
+  // Clear any event delivered by the deadline generation that was just
+  // cancelled/replaced. The newly armed deadline cannot fire for seconds.
+  statusCenterDeadlinePending_.store(false, std::memory_order_relaxed);
+}
 
-  if (!debugMode_) {
+void CompatUi::scheduleStatusCenterDeadline() {
+  if (!timing_ || statusCenterDeadline_ == core::kInvalidDeadlineHandle) return;
+
+  timing_->cancel(statusCenterDeadline_);
+  if (debugMode_ || screen_ != Screen::Home) return;
+
+  const bool haveTime = std::time(nullptr) > 100000;
+  const bool haveIp = wifi_ && wifi_->stationConnected();
+  if (!(haveTime && haveIp)) return;
+
+  std::uint32_t delayMs = 0;
+  switch (statusCenterCycle_.mode()) {
+    case core::StatusCenterMode::Time:
+      delayMs = core::StatusCenterCycle::kTimeDurationMs;
+      break;
+    case core::StatusCenterMode::Ip:
+      delayMs = core::StatusCenterCycle::kIpDurationMs;
+      break;
+    case core::StatusCenterMode::Fallback:
+      return;
+  }
+  timing_->schedule(statusCenterDeadline_, delayMs);
+}
+
+void CompatUi::armScreenTimeout() {
+  if (!timing_ || screenTimeoutDeadline_ == core::kInvalidDeadlineHandle) return;
+
+  timing_->cancel(screenTimeoutDeadline_);
+  if (!config_ || config_->hardware.screenSaverMinutes <= 0 ||
+      screenPowerFsm_.state() == core::ScreenPowerState::Off) {
+    return;
+  }
+
+  const std::uint64_t timeoutMs64 =
+      static_cast<std::uint64_t>(config_->hardware.screenSaverMinutes) *
+      60ULL * 1000ULL;
+  constexpr auto kMaxTimeoutMs = std::numeric_limits<std::uint32_t>::max();
+  const std::uint32_t timeoutMs = timeoutMs64 > kMaxTimeoutMs
+      ? kMaxTimeoutMs
+      : static_cast<std::uint32_t>(timeoutMs64);
+  timing_->schedule(screenTimeoutDeadline_, timeoutMs);
+  // Clear an already-delivered event from the generation we just replaced.
+  // A newly armed screensaver deadline cannot expire immediately.
+  screenTimeoutPending_.store(false, std::memory_order_relaxed);
+}
+
+void CompatUi::cancelScreenTimeout() {
+  screenTimeoutPending_.store(false, std::memory_order_relaxed);
+  if (timing_ && screenTimeoutDeadline_ != core::kInvalidDeadlineHandle) {
+    timing_->cancel(screenTimeoutDeadline_);
+  }
+}
+
+void CompatUi::noteUserActivity(std::uint32_t now) {
+  lastInteractionAt_ = now;
+  armScreenTimeout();
+}
+
+void CompatUi::updateTimedStatusInvalidation(std::uint32_t now) {
+  if (screen_ != Screen::Home) {
+    if (timing_ && statusCenterDeadline_ != core::kInvalidDeadlineHandle) {
+      timing_->cancel(statusCenterDeadline_);
+    }
+    return;
+  }
+
+  const std::time_t wallNow = std::time(nullptr);
+  const bool haveTime = wallNow > 100000;
+  const bool haveIp = wifi_ && wifi_->stationConnected();
+  const bool backgroundStatusTiming =
+      timing_ && statusCenterDeadline_ != core::kInvalidDeadlineHandle;
+
+  // NTP synchronization does not currently provide a callback. Detect the
+  // one-time availability transition cheaply in the UI loop, then hand all
+  // subsequent 4s/2s cycling to the deadline service.
+  if (haveTime != lastTimeAvailable_) {
+    lastTimeAvailable_ = haveTime;
+    if (!debugMode_ && statusCenterCycle_.update(now, haveTime, haveIp)) {
+      statusCenterDirty_ = true;
+    }
+    scheduleStatusCenterDeadline();
+  }
+
+  if (backgroundStatusTiming) {
+    if (statusCenterDeadlinePending_.exchange(false, std::memory_order_acq_rel)) {
+      if (!debugMode_ && statusCenterCycle_.update(now, haveTime, haveIp)) {
+        statusCenterDirty_ = true;
+      }
+      scheduleStatusCenterDeadline();
+    }
+  } else if (!debugMode_) {
+    // Safe fallback if the platform timing service could not be created.
     if (statusCenterCycle_.update(now, haveTime, haveIp)) {
       statusCenterDirty_ = true;
     }
   }
 
+  // The displayed clock has minute precision. This cheap comparison is kept
+  // in the main task because wall-clock synchronization can jump and because
+  // repainting remains a UI concern. It does not cause periodic redraws when
+  // the visible minute has not changed.
   if (haveTime) {
     std::tm local{};
     localtime_r(&wallNow, &local);
@@ -348,6 +500,7 @@ void CompatUi::updateTimedStatusInvalidation(std::uint32_t now) {
 
 void CompatUi::tick() {
   const auto now = millis();
+  updateHaptics(now);  // no-op when the background timing service is active
 
   const m5::touch_detail_t* touch = nullptr;
   core::ScreenTouchPhase touchPhase = core::ScreenTouchPhase::None;
@@ -358,19 +511,33 @@ void CompatUi::tick() {
         : core::ScreenTouchPhase::Released;
   }
 
+  // A fresh touch while awake resets the idle deadline before the screen FSM
+  // consumes any simultaneously delivered timeout event.
+  if (screenPowerFsm_.state() == core::ScreenPowerState::Awake &&
+      touch && touch->wasPressed()) {
+    noteUserActivity(now);
+  }
+
+  const bool backgroundScreenTiming =
+      timing_ && screenTimeoutDeadline_ != core::kInvalidDeadlineHandle;
+  const bool timeoutExpired = backgroundScreenTiming
+      ? screenTimeoutPending_.exchange(false, std::memory_order_acq_rel)
+      : fallbackScreenTimeoutExpired(now);
+
   const auto previousPowerState = screenPowerFsm_.state();
-  const auto powerStep =
-      screenPowerFsm_.step(touchPhase, screenTimeoutExpired(now));
+  const auto powerStep = screenPowerFsm_.step(touchPhase, timeoutExpired);
 
   if (powerStep.action == core::ScreenPowerAction::TurnOff) {
     Serial.println("[UI] screen FSM: AWAKE -> OFF (timeout)");
     resetHomeTilePress();
+    stopHaptics();
+    cancelScreenTimeout();
     setDisplayPowered(false);
   } else if (powerStep.action == core::ScreenPowerAction::TurnOn) {
     Serial.println("[UI] screen FSM: OFF -> WAKE_GUARD (wake touch consumed)");
     resetHomeTilePress();
-    lastInteractionAt_ = now;
-    statusCenterCycle_.reset(now);
+    noteUserActivity(now);
+    resetStatusCenterCycle(now);
     lastClockMinute_ = -1;
     if (screen_ == Screen::Home) statusCenterDirty_ = true;
     setDisplayPowered(true);
@@ -389,8 +556,6 @@ void CompatUi::tick() {
   if (!message_.isEmpty()) {
     resetHomeTilePress();
   } else if (touch) {
-    lastInteractionAt_ = now;
-
     if (homeTilePressActive_) {
       updateHomeTilePress(*touch, now);
     } else if (screen_ == Screen::Home && touch->wasPressed() &&
@@ -413,7 +578,7 @@ void CompatUi::tick() {
   if (hasPendingInvalidations()) flushInvalidations(now);
 }
 
-bool CompatUi::screenTimeoutExpired(std::uint32_t now) const {
+bool CompatUi::fallbackScreenTimeoutExpired(std::uint32_t now) const {
   if (!config_) return false;
   const int minutes = config_->hardware.screenSaverMinutes;
   if (minutes <= 0) return false;
@@ -1246,6 +1411,7 @@ bool CompatUi::beginHomeTilePress(
       core::PressPhase::Pressed,
       now,
       config_ ? config_->ui.longPressMs : kDefaultLongPressMs);
+  triggerHaptic(core::HapticCue::Press, now);
   return true;
 }
 
@@ -1272,6 +1438,9 @@ void CompatUi::updateHomeTilePress(
       now,
       config_ ? config_->ui.longPressMs : kDefaultLongPressMs);
 
+  if (event == core::PressGesture::LongPress) {
+    triggerHaptic(core::HapticCue::LongPress, now);
+  }
   dispatchHomeTileGesture(event);
 
   if (phase == core::PressPhase::Released || !tilePressGesture_.active()) {
@@ -1299,6 +1468,55 @@ void CompatUi::resetHomeTilePress() {
   homeTilePressTile_ = 0;
   homeTilePressStartX_ = 0;
   homeTilePressStartY_ = 0;
+}
+
+void CompatUi::triggerHaptic(core::HapticCue cue, std::uint32_t now) {
+  const bool backgroundTiming = timing_ &&
+      hapticOnDeadline_ != core::kInvalidDeadlineHandle &&
+      hapticOffDeadline_ != core::kInvalidDeadlineHandle;
+
+  if (backgroundTiming) {
+    const std::uint32_t durationMs = cue == core::HapticCue::Press
+        ? core::HapticFeedback::kPressPulseMs
+        : core::HapticFeedback::kLongPressPulseMs;
+
+    // Both motor transitions execute in the timing worker, so a slow screen
+    // repaint cannot stretch the pulse. Re-arming HapticOff replaces the old
+    // pulse deadline atomically at the scheduler-slot level.
+    timing_->schedule(hapticOnDeadline_, 0);
+    timing_->schedule(hapticOffDeadline_, durationMs);
+    return;
+  }
+
+  // Safe compatibility fallback if the timing service failed to initialize.
+  hapticMotor_.apply(hapticFeedback_.trigger(cue, now));
+}
+
+void CompatUi::updateHaptics(std::uint32_t now) {
+  const bool backgroundTiming = timing_ &&
+      hapticOnDeadline_ != core::kInvalidDeadlineHandle &&
+      hapticOffDeadline_ != core::kInvalidDeadlineHandle;
+  if (backgroundTiming) return;
+  hapticMotor_.apply(hapticFeedback_.update(now));
+}
+
+void CompatUi::stopHaptics() {
+  const bool backgroundTiming = timing_ &&
+      hapticOnDeadline_ != core::kInvalidDeadlineHandle &&
+      hapticOffDeadline_ != core::kInvalidDeadlineHandle;
+
+  if (backgroundTiming) {
+    timing_->cancel(hapticOnDeadline_);
+    timing_->cancel(hapticOffDeadline_);
+    timing_->schedule(hapticOffDeadline_, 0);
+    hapticFeedback_.stop();
+    return;
+  }
+
+  hapticMotor_.apply(hapticFeedback_.stop());
+  // Also force the physical output off in case the MCU/UI was reinitialized
+  // while the abstract controller believed it was already idle.
+  hapticMotor_.stop();
 }
 
 bool CompatUi::hitTestHomeTile(
@@ -1401,6 +1619,7 @@ void CompatUi::handleDetailTouchDebug(int x, int y) {
   if (item.type != model::TileItemType::Switch) return;
 
   auto& device = item.switchDevice;
+  triggerHaptic(core::HapticCue::Press, millis());
   mqtt_->switchTileItem(tile.id, item.id, !device.active);
 }
 
@@ -1419,6 +1638,7 @@ void CompatUi::handleDetailTouchUser(int x, int y) {
   if (tile.items.size() == 1 && tile.type != model::TileType::Scene) {
     auto& item = tile.items.front();
     if (item.type == model::TileItemType::Switch) {
+      triggerHaptic(core::HapticCue::Press, millis());
       mqtt_->switchTileItem(tile.id, item.id, !item.switchDevice.active);
     }
     return;
@@ -1433,6 +1653,7 @@ void CompatUi::handleDetailTouchUser(int x, int y) {
 
   auto& item = tile.items[idx];
   if (item.type != model::TileItemType::Switch) return;
+  triggerHaptic(core::HapticCue::Press, millis());
   mqtt_->switchTileItem(tile.id, item.id, !item.switchDevice.active);
 }
 
@@ -1443,6 +1664,7 @@ void CompatUi::handleFooterTouch(int x) {
   const auto action = footerActionForSlot(slot);
   if (!footerActionEnabled(action)) return;
 
+  triggerHaptic(core::HapticCue::Press, millis());
   executeFooterAction(action);
 }
 

@@ -1,6 +1,7 @@
 #include <unity.h>
 
 #include "Crc16.h"
+#include "HapticFeedback.h"
 #include "PressGesture.h"
 #include "ScreenPowerFsm.h"
 #include "StatusCenterCycle.h"
@@ -13,6 +14,55 @@ void tearDown() {}
 void test_crc16_ibm_known_vector() {
   const auto* bytes = reinterpret_cast<const std::uint8_t*>("123456789");
   TEST_ASSERT_EQUAL_HEX16(0x4B37, homepoint::core::crc16Ibm(bytes, 9));
+}
+
+
+void test_haptic_press_pulse_is_bounded() {
+  using homepoint::core::HapticCue;
+  using homepoint::core::HapticFeedback;
+
+  HapticFeedback haptics;
+  auto output = haptics.trigger(HapticCue::Press, 100);
+  TEST_ASSERT_TRUE(output.changed);
+  TEST_ASSERT_EQUAL_UINT8(HapticFeedback::kMotorLevel, output.level);
+  TEST_ASSERT_TRUE(haptics.active());
+
+  output = haptics.update(299);
+  TEST_ASSERT_FALSE(output.changed);
+  TEST_ASSERT_TRUE(haptics.active());
+
+  output = haptics.update(300);
+  TEST_ASSERT_TRUE(output.changed);
+  TEST_ASSERT_EQUAL_UINT8(0, output.level);
+  TEST_ASSERT_FALSE(haptics.active());
+}
+
+void test_haptic_long_press_restarts_feedback_window() {
+  using homepoint::core::HapticCue;
+  using homepoint::core::HapticFeedback;
+
+  HapticFeedback haptics;
+  haptics.trigger(HapticCue::Press, 100);
+  haptics.update(300);
+
+  auto output = haptics.trigger(HapticCue::LongPress, 700);
+  TEST_ASSERT_TRUE(output.changed);
+  TEST_ASSERT_EQUAL_UINT8(HapticFeedback::kMotorLevel, output.level);
+
+  output = haptics.update(949);
+  TEST_ASSERT_FALSE(output.changed);
+  output = haptics.update(950);
+  TEST_ASSERT_TRUE(output.changed);
+  TEST_ASSERT_EQUAL_UINT8(0, output.level);
+}
+
+void test_haptic_stop_turns_active_pulse_off_immediately() {
+  homepoint::core::HapticFeedback haptics;
+  haptics.trigger(homepoint::core::HapticCue::Press, 10);
+  const auto output = haptics.stop();
+  TEST_ASSERT_TRUE(output.changed);
+  TEST_ASSERT_EQUAL_UINT8(0, output.level);
+  TEST_ASSERT_FALSE(haptics.active());
 }
 
 void test_screen_power_timeout_turns_display_off() {
@@ -212,6 +262,9 @@ void test_ui_change_preserves_model_item_coordinates() {
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_crc16_ibm_known_vector);
+  RUN_TEST(test_haptic_press_pulse_is_bounded);
+  RUN_TEST(test_haptic_long_press_restarts_feedback_window);
+  RUN_TEST(test_haptic_stop_turns_active_pulse_off_immediately);
   RUN_TEST(test_screen_power_timeout_turns_display_off);
   RUN_TEST(test_screen_power_wake_gesture_is_consumed_through_release);
   RUN_TEST(test_screen_power_does_not_sleep_under_active_touch);
