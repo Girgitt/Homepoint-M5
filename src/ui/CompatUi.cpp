@@ -592,19 +592,22 @@ void CompatUi::tick() {
     Serial.println("[UI] screen FSM: WAKE_GUARD -> AWAKE (wake gesture released)");
   }
 
-  // Full semantic changes (for example switching debug/user mode from the
-  // web UI) must update the LCD memory even while the backlight is off. This
-  // keeps screenshots and the eventual wake image in sync without waking the
-  // physical display. Routine status/model invalidations may remain deferred.
-  if (!screenPowerFsm_.acceptsUiInput() && fullDirty_) {
-    flushInvalidations(now);
+  // Screen power controls physical visibility and input ownership, not the
+  // renderer. Keep the LCD memory current while the backlight is off so web
+  // screenshots, timed status text and model-driven tiles continue to reflect
+  // live state. This also ensures waking never exposes a stale frame.
+  updateTimedStatusInvalidation(now);
+
+  if (!screenPowerFsm_.acceptsUiInput()) {
+    if (hasPendingInvalidations()) flushInvalidations(now);
+    if (powerStep.consumeTouch) resetHomeTilePress();
+    return;
   }
 
   if (powerStep.consumeTouch) {
     resetHomeTilePress();
     return;
   }
-  if (!screenPowerFsm_.acceptsUiInput()) return;
 
   if (!message_.isEmpty()) {
     resetHomeTilePress();
@@ -627,7 +630,6 @@ void CompatUi::tick() {
     resetHomeTilePress();
   }
 
-  updateTimedStatusInvalidation(now);
   if (hasPendingInvalidations()) flushInvalidations(now);
 }
 
