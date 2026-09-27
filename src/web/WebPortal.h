@@ -8,6 +8,7 @@
 #include "../config/PersistentSettings.h"
 #include "../network/MqttManager.h"
 #include "../network/WifiManager.h"
+#include "../../lib/core/DisplayCapture.h"
 
 namespace homepoint::web {
 
@@ -21,6 +22,7 @@ class WebPortal {
       config::ConfigStore* configStore,
       network::WifiManager* wifi,
       network::MqttManager* mqtt,
+      core::DisplayCapture* displayCapture,
       std::function<void()> reloadCallback,
       std::function<void(bool)> debugUiChangedCallback);
 
@@ -34,6 +36,7 @@ class WebPortal {
   config::ConfigStore* configStore_ = nullptr;
   network::WifiManager* wifi_ = nullptr;
   network::MqttManager* mqtt_ = nullptr;
+  core::DisplayCapture* displayCapture_ = nullptr;
   std::function<void()> reloadCallback_;
   std::function<void(bool)> debugUiChangedCallback_;
 
@@ -46,6 +49,9 @@ class WebPortal {
   void installCaptiveRoutes();
 
   static String normalizeUploadPath(const String& filename);
+  static String normalizePath(const String& path);
+  static String contentTypeForPath(const String& path);
+  static bool queryFlag(AsyncWebServerRequest* request, const char* name);
 };
 
 }  // namespace homepoint::web

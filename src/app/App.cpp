@@ -37,6 +37,11 @@ void App::setup() {
     Serial.println("[BOOT] timing service unavailable; using UI polling fallbacks");
   }
 
+  const bool displayCaptureReady = displayCapture_.begin();
+  if (!displayCaptureReady) {
+    Serial.println("[BOOT] display screenshot service unavailable");
+  }
+
   const bool persistentReady = persistentStore_.begin();
   auto loadResult = config::PersistentLoadResult::IoError;
   if (persistentReady) {
@@ -125,6 +130,7 @@ void App::setup() {
       &configStore_,
       &wifi_,
       &mqtt_,
+      displayCaptureReady ? &displayCapture_ : nullptr,
       [this]() { reloadConfiguration(); },
       [this](bool enabled) { setDebugUi(enabled); });
 }
@@ -137,7 +143,9 @@ void App::loop() {
   web_.tick();
   maybeConfigureTime();
   processPendingUiStatusChanges();
+  processPendingUiControls();
   ui_.tick();
+  displayCapture_.service();
 
   delay(5);
 }
@@ -208,7 +216,17 @@ void App::resolveConfiguredHostname() {
 }
 
 void App::setDebugUi(bool enabled) {
-  bootstrap_.debugUi = enabled;
+  // WebPortal runs on the AsyncWebServer task. Keep UI mutations on the main
+  // task so display state remains single-threaded now and LVGL-safe later.
+  pendingDebugUi_.store(enabled ? 1 : 0, std::memory_order_release);
+  Serial.printf("[UI] display mode change queued: %s\n", enabled ? "debug" : "user");
+}
+
+void App::processPendingUiControls() {
+  const int pending = pendingDebugUi_.exchange(-1, std::memory_order_acq_rel);
+  if (pending < 0) return;
+
+  const bool enabled = pending != 0;
   ui_.setDebugMode(enabled);
   Serial.printf("[UI] display mode changed: %s\n", enabled ? "debug" : "user");
 }

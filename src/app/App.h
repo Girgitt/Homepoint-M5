@@ -9,6 +9,7 @@
 #include "../network/MqttManager.h"
 #include "../network/WifiManager.h"
 #include "../system/EspDeadlineScheduler.h"
+#include "../system/M5DisplayCapture.h"
 #include "../ui/CompatUi.h"
 #include "../web/WebPortal.h"
 
@@ -29,6 +30,7 @@ class App {
   network::MqttManager mqtt_;
   web::WebPortal web_;
   homepoint::system::EspDeadlineScheduler timing_;
+  homepoint::system::M5DisplayCapture displayCapture_;
   ui::CompatUi ui_;
 
   bool configValid_ = false;
@@ -36,6 +38,7 @@ class App {
   bool previousWifiConnected_ = false;
   std::atomic<bool> wifiStatusPending_{false};
   std::atomic<bool> mqttStatusPending_{false};
+  std::atomic<int> pendingDebugUi_{-1};
   String configMessage_;
 
   void reloadConfiguration();
@@ -43,6 +46,7 @@ class App {
   void applyHardwareConfig();
   void maybeConfigureTime();
   void processPendingUiStatusChanges();
+  void processPendingUiControls();
   void setDebugUi(bool enabled);
 };
 

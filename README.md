@@ -40,11 +40,17 @@ Implemented in the bootstrap:
 - Embedded recovery/setup web pages: a damaged or missing LittleFS image does
   not remove the configuration channel.
 - Authenticated web UI with:
-  - raw `config.json` editor;
-  - JSON validation before commit;
-  - last-good backup;
-  - file list/upload/download/delete;
-  - reload;
+  - bounded two-pane LittleFS file manager with recursive directory listing, search, visible independent scrollbars, and a draggable height control for the list/editor;
+  - inline JPEG/PNG/GIF/BMP/SVG preview and explicit download;
+  - in-browser editing/creation of JSON and common text files with unsaved-change warnings;
+  - atomic file replacement for browser edits/uploads, including upload destination paths;
+  - JSON syntax validation for generic JSON edits/uploads and full application-schema
+    validation plus last-good backup for `config.json`; `config.lastgood.json` is
+    exposed read-only and direct upload replacement of `config.json` is refused;
+  - on-demand capture and browser preview/download of the actual M5 display,
+    with completion-aware 2/5/10-second refresh scheduling;
+  - file upload/delete;
+  - configuration reload;
   - reboot;
   - OTA firmware upload;
   - clear-bootstrap-settings action.

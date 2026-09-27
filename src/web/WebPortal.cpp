@@ -3,10 +3,52 @@
 #include <LittleFS.h>
 #include <Update.h>
 #include <utility>
+#include <algorithm>
+#include <cstring>
+#include <cstdlib>
+#include <cstdio>
+#include <esp_heap_caps.h>
 
 #include "Pages.h"
 
 namespace homepoint::web {
+namespace {
+
+constexpr std::size_t kMaxEditableTextBytes = 128u * 1024u;
+
+struct UploadStatus {
+  int statusCode;
+  bool completed;
+  char message[192];
+};
+
+void setUploadStatus(UploadStatus* status, int code, const String& message) {
+  if (!status) return;
+  status->statusCode = code;
+  status->completed = true;
+  message.toCharArray(status->message, sizeof(status->message));
+}
+
+void* allocateRequestBuffer(std::size_t bytes) {
+  // ESPAsyncWebServer releases request->_tempObject with free() if a request
+  // is aborted. Keep temporary request bodies malloc-compatible; do not store
+  // objects allocated with C++ new in _tempObject.
+  void* buffer = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!buffer) buffer = heap_caps_malloc(bytes, MALLOC_CAP_8BIT);
+  return buffer;
+}
+
+String uploadStagePath(const AsyncWebServerRequest* request) {
+  char suffix[24];
+  snprintf(
+      suffix,
+      sizeof(suffix),
+      "%lx",
+      static_cast<unsigned long>(reinterpret_cast<std::uintptr_t>(request)));
+  return String("/.__hpm5_upload_") + suffix + ".tmp";
+}
+
+}  // namespace
 
 WebPortal::WebPortal() = default;
 
@@ -16,6 +58,7 @@ void WebPortal::begin(
     config::ConfigStore* configStore,
     network::WifiManager* wifi,
     network::MqttManager* mqtt,
+    core::DisplayCapture* displayCapture,
     std::function<void()> reloadCallback,
     std::function<void(bool)> debugUiChangedCallback) {
   persistentStore_ = persistentStore;
@@ -23,6 +66,7 @@ void WebPortal::begin(
   configStore_ = configStore;
   wifi_ = wifi;
   mqtt_ = mqtt;
+  displayCapture_ = displayCapture;
   reloadCallback_ = std::move(reloadCallback);
   debugUiChangedCallback_ = std::move(debugUiChangedCallback);
 
@@ -172,24 +216,45 @@ void WebPortal::installRoutes() {
       "/api/config", HTTP_POST,
       [this](AsyncWebServerRequest* request) {
         if (!authenticate(request)) return;
+        if (request->contentLength() == 0) {
+          request->send(400, "text/plain", "Configuration body must not be empty");
+        }
       },
       nullptr,
       [this](AsyncWebServerRequest* request, std::uint8_t* data,
              std::size_t len, std::size_t index, std::size_t total) {
         if (!authenticate(request)) return;
+        const bool bodyRangeInvalid = index > total || len > total - index;
+        if (total == 0 || total > kMaxEditableTextBytes || bodyRangeInvalid) {
+          if (index == 0) {
+            request->send(
+                total > kMaxEditableTextBytes ? 413 : 400,
+                "text/plain",
+                total > kMaxEditableTextBytes
+                    ? "Configuration is limited to 128 KiB"
+                    : "Invalid configuration request body");
+          }
+          return;
+        }
 
         if (index == 0) {
-          request->_tempObject = new String();
-          static_cast<String*>(request->_tempObject)->reserve(total + 1);
+          auto* body = static_cast<char*>(allocateRequestBuffer(total + 1u));
+          if (!body) {
+            request->send(507, "text/plain", "Not enough memory to buffer configuration");
+            return;
+          }
+          body[total] = '\0';
+          request->_tempObject = body;
         }
-        auto* body = static_cast<String*>(request->_tempObject);
+
+        auto* body = static_cast<char*>(request->_tempObject);
         if (!body) return;
-        body->concat(reinterpret_cast<const char*>(data), len);
+        std::memcpy(body + index, data, len);
 
         if (index + len == total) {
           String error;
-          const bool ok = configStore_->saveConfigAtomically(*body, error);
-          delete body;
+          const bool ok = configStore_->saveConfigAtomically(body, total, error);
+          free(body);
           request->_tempObject = nullptr;
 
           bool hostnameChanged = false;
@@ -225,13 +290,20 @@ void WebPortal::installRoutes() {
       request->send(400, "text/plain", "Missing path");
       return;
     }
-    String path = request->getParam("path")->value();
-    if (!path.startsWith("/")) path = "/" + path;
+    const String path = normalizePath(request->getParam("path")->value());
     if (!config::ConfigStore::safePath(path) || !LittleFS.exists(path)) {
       request->send(404, "text/plain", "Not found");
       return;
     }
-    request->send(LittleFS, path, "application/octet-stream", true);
+    File file = LittleFS.open(path, "r");
+    const bool regularFile = file && !file.isDirectory();
+    file.close();
+    if (!regularFile) {
+      request->send(400, "text/plain", "Path is not a file");
+      return;
+    }
+    const bool download = queryFlag(request, "download");
+    request->send(LittleFS, path, contentTypeForPath(path), download);
   });
 
   server_.on("/api/file", HTTP_DELETE, [this](AsyncWebServerRequest* request) {
@@ -240,17 +312,197 @@ void WebPortal::installRoutes() {
       request->send(400, "text/plain", "Missing path");
       return;
     }
-    String path = request->getParam("path")->value();
-    if (!path.startsWith("/")) path = "/" + path;
+    const String path = normalizePath(request->getParam("path")->value());
     const bool ok = configStore_->removeFile(path);
     request->send(ok ? 200 : 400, "text/plain", ok ? "Deleted" : "Delete refused");
+  });
+
+  server_.on(
+      "/api/file/text", HTTP_POST,
+      [this](AsyncWebServerRequest* request) {
+        if (!authenticate(request)) return;
+        // ESPAsyncWebServer does not invoke the body callback for an empty
+        // request body. Handle that case here so an existing text file can
+        // intentionally be cleared and a new empty text file can be created.
+        if (request->contentLength() != 0) return;
+        if (!request->hasParam("path")) {
+          request->send(400, "text/plain", "Missing path");
+          return;
+        }
+
+        const String path = normalizePath(request->getParam("path")->value());
+        if (!config::ConfigStore::editableTextPath(path)) {
+          request->send(400, "text/plain", "File type is not editable");
+          return;
+        }
+
+        String error;
+        const bool ok = configStore_->saveTextFileAtomically(path, "", 0, error);
+        request->send(
+            ok ? 200 : 400,
+            "text/plain",
+            ok ? "File saved" : error);
+      },
+      nullptr,
+      [this](AsyncWebServerRequest* request, std::uint8_t* data,
+             std::size_t len, std::size_t index, std::size_t total) {
+        if (!authenticate(request)) return;
+        const bool bodyRangeInvalid = index > total || len > total - index;
+        if (!request->hasParam("path") || total > kMaxEditableTextBytes ||
+            bodyRangeInvalid) {
+          if (index == 0) {
+            request->send(
+                total > kMaxEditableTextBytes ? 413 : 400,
+                "text/plain",
+                total > kMaxEditableTextBytes
+                    ? "Editable text files are limited to 128 KiB"
+                    : "Missing path or invalid request body");
+          }
+          return;
+        }
+
+        const String path = normalizePath(request->getParam("path")->value());
+        if (!config::ConfigStore::editableTextPath(path)) {
+          if (index == 0) request->send(400, "text/plain", "File type is not editable");
+          return;
+        }
+
+        if (index == 0) {
+          auto* body = static_cast<char*>(allocateRequestBuffer(total + 1u));
+          if (!body) {
+            request->send(507, "text/plain", "Not enough memory to buffer text file");
+            return;
+          }
+          body[total] = '\0';
+          request->_tempObject = body;
+        }
+        auto* body = static_cast<char*>(request->_tempObject);
+        if (!body) return;
+        std::memcpy(body + index, data, len);
+
+        if (index + len == total) {
+          String error;
+          const bool ok = configStore_->saveTextFileAtomically(path, body, total, error);
+          free(body);
+          request->_tempObject = nullptr;
+
+          bool hostnameChanged = false;
+          if (ok && path == "/config.json" && wifi_) {
+            model::AppConfig savedConfig;
+            String loadError;
+            if (configStore_->load(savedConfig, loadError) &&
+                !savedConfig.hostname.isEmpty() &&
+                savedConfig.hostname != wifi_->requestedHostname()) {
+              hostnameChanged = true;
+            }
+          }
+
+          if (!ok) {
+            request->send(400, "text/plain", error);
+          } else if (hostnameChanged) {
+            request->send(200, "text/plain", "File saved; hostname changed; rebooting");
+            requestRestart(1200);
+          } else {
+            request->send(200, "text/plain", "File saved");
+          }
+        }
+      });
+
+  server_.on("/api/screen/capture", HTTP_POST, [this](AsyncWebServerRequest* request) {
+    if (!authenticate(request)) return;
+    if (!displayCapture_) {
+      request->send(503, "text/plain", "Display capture unavailable");
+      return;
+    }
+
+    std::uint32_t requestId = 0;
+    const auto result = displayCapture_->requestSnapshot(requestId);
+    if (result == core::DisplayCaptureResult::Busy && requestId != 0) {
+      String body = String("{\"id\":") + requestId + "}";
+      request->send(202, "application/json", body);
+      return;
+    }
+    if (result != core::DisplayCaptureResult::Ok || requestId == 0) {
+      request->send(503, "text/plain", "Display capture unavailable");
+      return;
+    }
+
+    String body = String("{\"id\":") + requestId + "}";
+    request->send(202, "application/json", body);
+  });
+
+  server_.on("/api/screen.bmp", HTTP_GET, [this](AsyncWebServerRequest* request) {
+    if (!authenticate(request)) return;
+    if (!displayCapture_) {
+      request->send(503, "text/plain", "Display capture unavailable");
+      return;
+    }
+
+    std::uint32_t requestId = 0;
+    if (request->hasParam("id")) {
+      const String value = request->getParam("id")->value();
+      char* end = nullptr;
+      const unsigned long parsed = strtoul(value.c_str(), &end, 10);
+      requestId = static_cast<std::uint32_t>(parsed);
+      if (requestId == 0 || !end || *end != '\0') {
+        request->send(400, "text/plain", "Invalid screenshot request id");
+        return;
+      }
+    }
+
+    core::DisplaySnapshot snapshot;
+    const auto result = displayCapture_->readSnapshot(requestId, snapshot);
+    if (result == core::DisplayCaptureResult::Pending) {
+      request->send(202, "text/plain", "Capture pending");
+      return;
+    }
+    if (result == core::DisplayCaptureResult::NotFound) {
+      request->send(404, "text/plain", "Screenshot not found");
+      return;
+    }
+    if (result == core::DisplayCaptureResult::Unavailable) {
+      request->send(503, "text/plain", "Display capture unavailable");
+      return;
+    }
+    if (result != core::DisplayCaptureResult::Ok || !snapshot.data || !snapshot.size) {
+      request->send(500, "text/plain", "Display capture failed");
+      return;
+    }
+
+    const core::DisplaySnapshot responseSnapshot = snapshot;
+    auto* response = request->beginResponse(
+        responseSnapshot.mimeType,
+        responseSnapshot.size,
+        [responseSnapshot](std::uint8_t* buffer, std::size_t maxLen,
+                           std::size_t index) -> std::size_t {
+          if (!responseSnapshot.data || index >= responseSnapshot.size) return 0;
+          const std::size_t count = std::min(
+              maxLen, responseSnapshot.size - index);
+          std::memcpy(buffer, responseSnapshot.data.get() + index, count);
+          return count;
+        });
+    response->addHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+    response->addHeader("Pragma", "no-cache");
+    response->addHeader("Content-Disposition", "inline; filename=homepoint-screen.bmp");
+    request->send(response);
   });
 
   server_.on(
       "/api/upload", HTTP_POST,
       [this](AsyncWebServerRequest* request) {
         if (!authenticate(request)) return;
-        request->send(200, "text/plain", "Uploaded");
+        auto* status = static_cast<UploadStatus*>(request->_tempObject);
+        if (!status) {
+          request->send(400, "text/plain", "No file was uploaded");
+          return;
+        }
+        const int code = status->completed ? status->statusCode : 500;
+        const String message = status->completed
+            ? String(status->message)
+            : String("Upload did not complete");
+        free(status);
+        request->_tempObject = nullptr;
+        request->send(code, "text/plain", message);
       },
       [this](AsyncWebServerRequest* request, const String& filename,
              std::size_t index, std::uint8_t* data, std::size_t len, bool final) {
@@ -258,17 +510,87 @@ void WebPortal::installRoutes() {
                 bootstrap_->webUsername.c_str(), bootstrap_->webPassword.c_str())) {
           return;
         }
-        if (!configStore_->mounted()) return;
 
+        UploadStatus* status = static_cast<UploadStatus*>(request->_tempObject);
         if (index == 0) {
-          const String path = normalizeUploadPath(filename);
-          if (!config::ConfigStore::safePath(path)) return;
-          request->_tempFile = LittleFS.open(path, "w");
+          if (status) {
+            setUploadStatus(status, 400, "Only one file may be uploaded per request");
+            return;
+          }
+          status = static_cast<UploadStatus*>(calloc(1, sizeof(UploadStatus)));
+          if (!status) {
+            request->send(507, "text/plain", "Not enough memory to track upload state");
+            return;
+          }
+          status->statusCode = 500;
+          snprintf(status->message, sizeof(status->message), "%s", "Upload did not complete");
+          request->_tempObject = status;
+
+          if (!configStore_->mounted()) {
+            setUploadStatus(status, 503, "LittleFS unavailable");
+            return;
+          }
+
+          const String targetPath = request->hasParam("path")
+              ? normalizePath(request->getParam("path")->value())
+              : normalizeUploadPath(filename);
+          if (!config::ConfigStore::safePath(targetPath) || targetPath == "/") {
+            setUploadStatus(status, 400, "Invalid upload destination");
+            return;
+          }
+          if (!config::ConfigStore::uploadablePath(targetPath)) {
+            setUploadStatus(
+                status,
+                400,
+                targetPath == "/config.json"
+                    ? "Upload to config.json is disabled; use the JSON editor so the configuration is validated"
+                    : "Destination is a managed read-only file");
+            return;
+          }
+
+          const String stagedPath = uploadStagePath(request);
+          LittleFS.remove(stagedPath);
+          request->onDisconnect([stagedPath]() {
+            LittleFS.remove(stagedPath);
+          });
+          request->_tempFile = LittleFS.open(stagedPath, "w");
+          if (!request->_tempFile) {
+            setUploadStatus(status, 507, "Could not create upload staging file");
+            return;
+          }
         }
-        if (len && request->_tempFile) request->_tempFile.write(data, len);
-        if (final && request->_tempFile) {
+
+        status = static_cast<UploadStatus*>(request->_tempObject);
+        if (!status || status->completed) return;
+
+        const String targetPath = request->hasParam("path")
+            ? normalizePath(request->getParam("path")->value())
+            : normalizeUploadPath(filename);
+        const String stagedPath = uploadStagePath(request);
+
+        if (len && (!request->_tempFile || request->_tempFile.write(data, len) != len)) {
+          if (request->_tempFile) request->_tempFile.close();
+          LittleFS.remove(stagedPath);
+          setUploadStatus(status, 507, "Upload write failed or filesystem is full");
+          return;
+        }
+
+        if (final) {
+          if (!request->_tempFile) {
+            LittleFS.remove(stagedPath);
+            setUploadStatus(status, 500, "Upload staging file is unavailable");
+            return;
+          }
           request->_tempFile.flush();
           request->_tempFile.close();
+
+          String error;
+          if (!configStore_->installUploadedFileAtomically(stagedPath, targetPath, error)) {
+            LittleFS.remove(stagedPath);
+            setUploadStatus(status, 400, error);
+            return;
+          }
+          setUploadStatus(status, 200, String("Uploaded to ") + targetPath);
         }
       });
 
@@ -364,6 +686,41 @@ String WebPortal::normalizeUploadPath(const String& filename) {
   if (slash >= 0) clean = clean.substring(slash + 1);
   if (!clean.startsWith("/")) clean = "/" + clean;
   return clean;
+}
+
+String WebPortal::normalizePath(const String& path) {
+  String clean = path;
+  clean.replace("\\", "/");
+  if (!clean.startsWith("/")) clean = "/" + clean;
+  return clean;
+}
+
+String WebPortal::contentTypeForPath(const String& path) {
+  String lower = path;
+  lower.toLowerCase();
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".gif")) return "image/gif";
+  if (lower.endsWith(".bmp")) return "image/bmp";
+  if (lower.endsWith(".svg")) return "image/svg+xml";
+  if (lower.endsWith(".json")) return "application/json; charset=utf-8";
+  if (lower.endsWith(".css")) return "text/css; charset=utf-8";
+  if (lower.endsWith(".js")) return "application/javascript; charset=utf-8";
+  if (lower.endsWith(".html") || lower.endsWith(".htm")) return "text/html; charset=utf-8";
+  if (lower.endsWith(".txt") || lower.endsWith(".md") ||
+      lower.endsWith(".csv") || lower.endsWith(".log")) {
+    return "text/plain; charset=utf-8";
+  }
+  if (lower.endsWith(".vlw")) return "application/octet-stream";
+  return "application/octet-stream";
+}
+
+bool WebPortal::queryFlag(AsyncWebServerRequest* request, const char* name) {
+  if (!request || !request->hasParam(name)) return false;
+  String value = request->getParam(name)->value();
+  value.toLowerCase();
+  return value.isEmpty() || value == "1" || value == "true" ||
+         value == "yes" || value == "on";
 }
 
 void WebPortal::requestRestart(std::uint32_t delayMs) {

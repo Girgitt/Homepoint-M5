@@ -208,8 +208,14 @@ bool ConfigStore::loadFromPath(
 
 bool ConfigStore::validateAndParse(
     const String& json, model::AppConfig& config, String& error) const {
+  return validateAndParse(json.c_str(), json.length(), config, error);
+}
+
+bool ConfigStore::validateAndParse(
+    const char* json, std::size_t length,
+    model::AppConfig& config, String& error) const {
   JsonDocument document;
-  const auto result = deserializeJson(document, json);
+  const auto result = deserializeJson(document, json, length);
   if (result) {
     error = String("JSON parse error: ") + result.c_str();
     return false;
@@ -563,15 +569,23 @@ bool ConfigStore::parseDocument(
 }
 
 bool ConfigStore::saveConfigAtomically(const String& json, String& error) {
+  return saveConfigAtomically(json.c_str(), json.length(), error);
+}
+
+bool ConfigStore::saveConfigAtomically(
+    const char* json, std::size_t length, String& error) {
   if (!mounted_) {
     error = "LittleFS is not mounted";
     return false;
   }
 
   model::AppConfig validationTarget;
-  if (!validateAndParse(json, validationTarget, error)) return false;
+  if (!validateAndParse(json, length, validationTarget, error)) return false;
 
-  if (!writeFile(kNewPath, json)) {
+  if (!writeFile(
+          kNewPath,
+          reinterpret_cast<const std::uint8_t*>(json),
+          length)) {
     error = "Could not write config.new.json";
     return false;
   }
@@ -595,6 +609,132 @@ bool ConfigStore::saveConfigAtomically(const String& json, String& error) {
     return false;
   }
 
+  error = "";
+  return true;
+}
+
+bool ConfigStore::saveTextFileAtomically(
+    const String& path, const String& text, String& error) {
+  return saveTextFileAtomically(path, text.c_str(), text.length(), error);
+}
+
+bool ConfigStore::saveTextFileAtomically(
+    const String& path, const char* text, std::size_t length, String& error) {
+  if (!mounted_) {
+    error = "LittleFS is not mounted";
+    return false;
+  }
+  if (!safePath(path) || path == "/" || !editableTextPath(path)) {
+    error = "File is read-only or not an editable text file";
+    return false;
+  }
+  if (path == kConfigPath) {
+    return saveConfigAtomically(text, length, error);
+  }
+
+  String lower = path;
+  lower.toLowerCase();
+  if (lower.endsWith(".json")) {
+    JsonDocument document;
+    const auto result = deserializeJson(document, text, length);
+    if (result) {
+      error = String("JSON parse error: ") + result.c_str();
+      return false;
+    }
+  }
+
+  const String stagedPath = transactionPath(path, ".new");
+  LittleFS.remove(stagedPath);
+  if (!writeFile(
+          stagedPath.c_str(),
+          reinterpret_cast<const std::uint8_t*>(text),
+          length)) {
+    error = "Could not write temporary file";
+    LittleFS.remove(stagedPath);
+    return false;
+  }
+
+  if (!replaceStagedFileAtomically(stagedPath, path, error)) {
+    LittleFS.remove(stagedPath);
+    return false;
+  }
+
+  error = "";
+  return true;
+}
+
+bool ConfigStore::installUploadedFileAtomically(
+    const String& stagedPath, const String& path, String& error) {
+  if (!mounted_) {
+    error = "LittleFS is not mounted";
+    return false;
+  }
+  if (!internalPath(stagedPath) || !LittleFS.exists(stagedPath)) {
+    error = "Upload staging file is unavailable";
+    return false;
+  }
+  if (!safePath(path) || path == "/") {
+    error = "Invalid upload destination";
+    return false;
+  }
+  if (!uploadablePath(path)) {
+    error = path == kConfigPath
+        ? "Upload to config.json is disabled; use the JSON editor so the configuration can be validated"
+        : "Destination is a managed read-only file";
+    return false;
+  }
+
+  String lower = path;
+  lower.toLowerCase();
+  if (lower.endsWith(".json")) {
+    File staged = LittleFS.open(stagedPath, "r");
+    if (!staged) {
+      error = "Could not reopen staged JSON file";
+      return false;
+    }
+    JsonDocument document;
+    const auto result = deserializeJson(document, staged);
+    staged.close();
+    if (result) {
+      error = String("JSON parse error: ") + result.c_str();
+      return false;
+    }
+  }
+
+  return replaceStagedFileAtomically(stagedPath, path, error);
+}
+
+bool ConfigStore::replaceStagedFileAtomically(
+    const String& stagedPath, const String& path, String& error) {
+  File existing = LittleFS.open(path, "r");
+  if (existing && existing.isDirectory()) {
+    existing.close();
+    error = "Destination is a directory";
+    return false;
+  }
+  existing.close();
+
+  const String backupPath = transactionPath(path, ".bak");
+  LittleFS.remove(backupPath);
+
+  const bool hadOriginal = LittleFS.exists(path);
+  if (hadOriginal && !LittleFS.rename(path, backupPath)) {
+    error = "Could not create temporary backup";
+    return false;
+  }
+
+  if (!LittleFS.rename(stagedPath, path)) {
+    if (hadOriginal) {
+      if (!LittleFS.rename(backupPath, path)) {
+        error = "Could not activate replacement and could not restore the original file";
+        return false;
+      }
+    }
+    error = "Could not activate replacement file";
+    return false;
+  }
+
+  if (hadOriginal) LittleFS.remove(backupPath);
   error = "";
   return true;
 }
@@ -656,8 +796,7 @@ bool ConfigStore::fileExists(const String& path) const {
 }
 
 bool ConfigStore::removeFile(const String& path) {
-  if (!mounted_ || !safePath(path)) return false;
-  if (path == "/" || path == kConfigPath) return false;
+  if (!mounted_ || !deletablePath(path)) return false;
   return LittleFS.remove(path);
 }
 
@@ -666,15 +805,7 @@ String ConfigStore::listFilesJson() const {
   JsonArray files = document["files"].to<JsonArray>();
 
   if (mounted_) {
-    File root = LittleFS.open("/");
-    File file = root.openNextFile();
-    while (file) {
-      JsonObject entry = files.add<JsonObject>();
-      entry["name"] = file.name();
-      entry["size"] = static_cast<std::uint32_t>(file.size());
-      entry["directory"] = file.isDirectory();
-      file = root.openNextFile();
-    }
+    appendFiles(files, "/", 0);
   }
 
   String out;
@@ -682,9 +813,91 @@ String ConfigStore::listFilesJson() const {
   return out;
 }
 
+void ConfigStore::appendFiles(
+    JsonArray files, const char* dirname, std::uint8_t depth) const {
+  constexpr std::uint8_t kMaxDirectoryDepth = 8;
+  if (depth > kMaxDirectoryDepth) return;
+
+  File root = LittleFS.open(dirname, "r");
+  if (!root || !root.isDirectory()) {
+    root.close();
+    return;
+  }
+
+  File file = root.openNextFile();
+  while (file) {
+    const String path = file.path() ? String(file.path()) : String();
+    const bool isDirectory = file.isDirectory();
+
+    if (!path.isEmpty() && !internalPath(path)) {
+      JsonObject entry = files.add<JsonObject>();
+      entry["name"] = path;
+      entry["size"] = static_cast<std::uint32_t>(file.size());
+      entry["directory"] = isDirectory;
+      if (!isDirectory) {
+        entry["editable"] = editableTextPath(path);
+        entry["deletable"] = deletablePath(path);
+        entry["uploadable"] = uploadablePath(path);
+      }
+    }
+
+    // Close the current entry before descending so recursive enumeration uses
+    // at most one directory handle per level. ConfigStore mounts LittleFS with
+    // a deliberately small max-open-files limit.
+    file.close();
+    if (isDirectory && !path.isEmpty() && !internalPath(path) &&
+        depth < kMaxDirectoryDepth) {
+      appendFiles(files, path.c_str(), depth + 1);
+    }
+    file = root.openNextFile();
+  }
+  root.close();
+}
+
+bool ConfigStore::internalPath(const String& path) {
+  return path.startsWith("/.__hpm5_") || path == kNewPath;
+}
+
+std::uint32_t ConfigStore::pathHash(const String& path) {
+  std::uint32_t hash = 2166136261u;
+  for (std::size_t i = 0; i < path.length(); ++i) {
+    hash ^= static_cast<std::uint8_t>(path[i]);
+    hash *= 16777619u;
+  }
+  return hash;
+}
+
+String ConfigStore::transactionPath(const String& path, const char* suffix) {
+  String out = "/.__hpm5_";
+  out += String(pathHash(path), HEX);
+  out += suffix;
+  return out;
+}
+
 bool ConfigStore::safePath(const String& path) {
   return path.startsWith("/") && path.indexOf("..") < 0 &&
-         path.indexOf('\\') < 0;
+         path.indexOf('\\') < 0 && !internalPath(path);
+}
+
+bool ConfigStore::editableTextPath(const String& path) {
+  if (!safePath(path) || path == "/" || path == kLastGoodPath) return false;
+  String lower = path;
+  lower.toLowerCase();
+  return lower.endsWith(".json") || lower.endsWith(".txt") ||
+         lower.endsWith(".md") || lower.endsWith(".css") ||
+         lower.endsWith(".js") || lower.endsWith(".html") ||
+         lower.endsWith(".htm") || lower.endsWith(".csv") ||
+         lower.endsWith(".log");
+}
+
+bool ConfigStore::deletablePath(const String& path) {
+  return safePath(path) && path != "/" && path != kConfigPath &&
+         path != kLastGoodPath;
+}
+
+bool ConfigStore::uploadablePath(const String& path) {
+  return safePath(path) && path != "/" && path != kConfigPath &&
+         path != kLastGoodPath;
 }
 
 String ConfigStore::readFile(const char* path) {
@@ -699,12 +912,20 @@ String ConfigStore::readFile(const char* path) {
 }
 
 bool ConfigStore::writeFile(const char* path, const String& content) {
+  return writeFile(
+      path,
+      reinterpret_cast<const std::uint8_t*>(content.c_str()),
+      content.length());
+}
+
+bool ConfigStore::writeFile(
+    const char* path, const std::uint8_t* content, std::size_t length) {
   File file = LittleFS.open(path, "w");
   if (!file) return false;
-  const auto written = file.print(content);
+  const auto written = length ? file.write(content, length) : 0u;
   file.flush();
   file.close();
-  return written == content.length();
+  return length == 0 || written == length;
 }
 
 bool ConfigStore::copyFile(const char* from, const char* to) {

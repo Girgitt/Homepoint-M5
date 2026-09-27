@@ -27,11 +27,12 @@ void test_haptic_press_pulse_is_bounded() {
   TEST_ASSERT_EQUAL_UINT8(HapticFeedback::kMotorLevel, output.level);
   TEST_ASSERT_TRUE(haptics.active());
 
-  output = haptics.update(299);
+  output = haptics.update(
+      100 + HapticFeedback::kPressPulseMs - 1);
   TEST_ASSERT_FALSE(output.changed);
   TEST_ASSERT_TRUE(haptics.active());
 
-  output = haptics.update(300);
+  output = haptics.update(100 + HapticFeedback::kPressPulseMs);
   TEST_ASSERT_TRUE(output.changed);
   TEST_ASSERT_EQUAL_UINT8(0, output.level);
   TEST_ASSERT_FALSE(haptics.active());
@@ -49,9 +50,10 @@ void test_haptic_long_press_restarts_feedback_window() {
   TEST_ASSERT_TRUE(output.changed);
   TEST_ASSERT_EQUAL_UINT8(HapticFeedback::kMotorLevel, output.level);
 
-  output = haptics.update(949);
+  output = haptics.update(
+      700 + HapticFeedback::kLongPressPulseMs - 1);
   TEST_ASSERT_FALSE(output.changed);
-  output = haptics.update(950);
+  output = haptics.update(700 + HapticFeedback::kLongPressPulseMs);
   TEST_ASSERT_TRUE(output.changed);
   TEST_ASSERT_EQUAL_UINT8(0, output.level);
 }
