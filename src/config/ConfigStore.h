@@ -18,6 +18,7 @@ class ConfigStore {
   bool ensureDefaultConfig();
   bool load(model::AppConfig& config, String& error);
   bool saveConfigAtomically(const String& json, String& error);
+  bool setHostname(const String& hostname, String& error);
 
   String readConfigText() const;
   bool importLegacyBootstrap(BootstrapSettings& settings) const;

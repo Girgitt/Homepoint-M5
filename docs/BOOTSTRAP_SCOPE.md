@@ -27,6 +27,7 @@ redesign.
 - M5Core2/AXP192-specific code -> M5Unified/M5GFX.
 - SPIFFS -> LittleFS.
 - Wi-Fi/web bootstrap credentials -> versioned EEPROM-backed record.
+- Hostname -> authoritative `/config.json` setting applied before station Wi-Fi starts; the historical EEPROM hostname is migration-only.
 - MQTT startup dependency -> optional service with backoff.
 - Invalid JSON -> degraded state; no reboot loop.
 - Main admin/setup pages -> embedded firmware pages so the recovery UI does

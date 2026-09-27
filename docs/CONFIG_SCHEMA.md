@@ -1,9 +1,11 @@
 # Homepoint-M5 application configuration
 
 Homepoint-M5 stores normal application configuration in `/config.json` on
-LittleFS. Wi-Fi credentials, hostname and web-administration credentials are
-stored separately in the versioned bootstrap record, so an invalid application
-configuration does not remove recovery/web access.
+LittleFS. The configured station hostname belongs to this application
+configuration. Wi-Fi credentials and web-administration credentials remain in
+the versioned bootstrap record so an invalid application configuration does not
+remove recovery/web access. Older bootstrap records may still contain a
+hostname, but it is used only as a one-way migration/recovery fallback.
 
 The current application schema is **schema version 2**.
 
@@ -28,6 +30,7 @@ A new configuration should use:
 ```json
 {
   "schemaVersion": 2,
+  "hostname": "homepoint-m5",
   "tiles": []
 }
 ```
@@ -37,6 +40,7 @@ A new configuration should use:
 ```json
 {
   "schemaVersion": 2,
+  "hostname": "homepoint-m5",
 
   "mqttbroker": "mqtt://192.168.2.1:1883",
   "mqttusername": "homepoint",
@@ -444,5 +448,19 @@ is activated.
 If active `/config.json` cannot be loaded during boot but
 `config.lastgood.json` is valid, Homepoint-M5 loads the last-good copy instead.
 
-This application-level configuration mechanism is independent from the
-bootstrap record used for Wi-Fi, hostname and web credentials.
+`hostname` is limited to 32 characters because it is passed to the
+Arduino-ESP32 DHCP client. The hostname must be installed before the Wi-Fi
+station interface starts, so changing it in the web configuration editor causes
+one controlled reboot after the new `config.json` has been committed. Ordinary
+configuration changes continue to use the normal explicit Apply action.
+
+For upgrades from earlier Homepoint-M5 builds, a missing/empty `hostname` is
+filled once from the legacy hostname stored in the bootstrap record (or from
+`homepoint-m5` if no legacy value exists). This migration writes only
+`config.json`; it never rewrites EEPROM and never requests a boot-time reboot.
+Therefore a bad EEPROM record or failed persistence cannot create a
+hostname-reconciliation reboot loop.
+
+The bootstrap record remains responsible for Wi-Fi credentials and web
+credentials. Its historical hostname field is retained only so existing schema
+v1/v2 records remain readable.

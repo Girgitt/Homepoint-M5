@@ -226,6 +226,19 @@ bool ConfigStore::parseDocument(
   model::AppConfig parsed;
   JsonObjectConst root = document.as<JsonObjectConst>();
 
+  JsonVariantConst hostnameValue = root["hostname"];
+  if (!hostnameValue.isNull()) {
+    parsed.hostname = hostnameValue | "";
+    if (parsed.hostname.isEmpty()) {
+      error = "'hostname' must not be empty when present";
+      return false;
+    }
+    if (parsed.hostname.length() > 32u) {
+      error = "'hostname' must be no longer than 32 characters";
+      return false;
+    }
+  }
+
   parsed.mqtt.uri = root["mqttbroker"] | "";
   parsed.mqtt.username = root["mqttusername"] | "";
   parsed.mqtt.password = root["mqttpasswd"] | "";
@@ -589,6 +602,34 @@ bool ConfigStore::saveConfigAtomically(const String& json, String& error) {
 String ConfigStore::readConfigText() const {
   if (!mounted_) return "{}";
   return readFile(kConfigPath);
+}
+
+bool ConfigStore::setHostname(const String& hostname, String& error) {
+  if (!mounted_) {
+    error = "LittleFS is not mounted";
+    return false;
+  }
+  if (hostname.isEmpty()) {
+    error = "Hostname must not be empty";
+    return false;
+  }
+  if (hostname.length() > 32u) {
+    error = "Hostname must be no longer than 32 characters";
+    return false;
+  }
+
+  JsonDocument document;
+  const auto result = deserializeJson(document, readFile(kConfigPath));
+  if (result || !document.is<JsonObject>()) {
+    error = result ? String("JSON parse error: ") + result.c_str()
+                   : String("Top-level JSON value must be an object");
+    return false;
+  }
+
+  document["hostname"] = hostname;
+  String updated;
+  serializeJsonPretty(document, updated);
+  return saveConfigAtomically(updated, error);
 }
 
 bool ConfigStore::importLegacyBootstrap(BootstrapSettings& settings) const {

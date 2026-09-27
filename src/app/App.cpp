@@ -44,7 +44,7 @@ void App::setup() {
   }
 
   Serial.printf(
-      "[BOOT] bootstrap storage: begin=%s load=%s configured=%s ssid='%s' hostname='%s'\n",
+      "[BOOT] bootstrap storage: begin=%s load=%s configured=%s ssid='%s' legacy-hostname='%s'\n",
       persistentReady ? "ok" : "failed",
       persistentLoadResultText(loadResult),
       bootstrap_.configured ? "yes" : "no",
@@ -90,9 +90,10 @@ void App::setup() {
       error.isEmpty() ? "" : " - ",
       error.c_str());
 
+  resolveConfiguredHostname();
   applyHardwareConfig();
 
-  wifi_.begin(bootstrap_, [this]() {
+  wifi_.begin(bootstrap_, config_.hostname, [this]() {
     wifiStatusPending_.store(true, std::memory_order_relaxed);
   });
 
@@ -164,11 +165,46 @@ void App::reloadConfiguration() {
   configValid_ = true;
   configMessage_ = error;
 
+  resolveConfiguredHostname();
+  if (config_.hostname != wifi_.requestedHostname()) {
+    Serial.printf(
+        "[CONFIG] hostname changed from '%s' to '%s'; reboot required to update DHCP identity\n",
+        wifi_.requestedHostname().c_str(),
+        config_.hostname.c_str());
+  }
+
   applyHardwareConfig();
   mqtt_.reconfigure(&config_);
   ui_.setConfig(&config_);
   ui_.clearMessage();
   timeConfigured_ = false;
+}
+
+void App::resolveConfiguredHostname() {
+  if (!config_.hostname.isEmpty()) return;
+
+  String fallback = bootstrap_.hostname;
+  if (fallback.isEmpty()) fallback = "homepoint-m5";
+  config_.hostname = fallback;
+
+  if (!configValid_ || !configStore_.mounted()) {
+    Serial.printf(
+        "[CONFIG] hostname missing; using fallback '%s' for this boot (not persisted)\n",
+        fallback.c_str());
+    return;
+  }
+
+  String error;
+  if (configStore_.setHostname(fallback, error)) {
+    Serial.printf(
+        "[CONFIG] migrated hostname '%s' into config.json; EEPROM hostname is now legacy-only\n",
+        fallback.c_str());
+  } else {
+    Serial.printf(
+        "[CONFIG] hostname migration not persisted: %s; using '%s' for this boot\n",
+        error.c_str(),
+        fallback.c_str());
+  }
 }
 
 void App::setDebugUi(bool enabled) {

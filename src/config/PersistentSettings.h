@@ -10,7 +10,8 @@ struct BootstrapSettings {
   bool configured = false;
   String wifiSsid;
   String wifiPassword;
-  String hostname = "homepoint-m5";
+  // Legacy migration/recovery fallback only. Runtime hostname is owned by config.json.
+  String hostname;
   String webUsername = "admin";
   String webPassword;
   bool debugUi = false;

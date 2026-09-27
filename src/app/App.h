@@ -39,6 +39,7 @@ class App {
   String configMessage_;
 
   void reloadConfiguration();
+  void resolveConfiguredHostname();
   void applyHardwareConfig();
   void maybeConfigureTime();
   void processPendingUiStatusChanges();

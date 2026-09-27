@@ -74,11 +74,31 @@ void WebPortal::installRoutes() {
       return;
     }
 
+    String hostname = readParam("hostname");
+    if (hostname.isEmpty()) hostname = "homepoint-m5";
+    if (hostname.length() > 32u) {
+      request->send(400, "text/plain", "Hostname must be no longer than 32 characters");
+      return;
+    }
+
+    if (configStore_ && configStore_->mounted()) {
+      if (!configStore_->ensureDefaultConfig()) {
+        request->send(500, "text/plain", "Could not create config.json");
+        return;
+      }
+      String configError;
+      if (!configStore_->setHostname(hostname, configError)) {
+        request->send(500, "text/plain", String("Could not save hostname to config.json: ") + configError);
+        return;
+      }
+    }
+
     bootstrap_->configured = true;
     bootstrap_->wifiSsid = ssid;
     bootstrap_->wifiPassword = readParam("wifiPassword");
-    bootstrap_->hostname = readParam("hostname");
-    if (bootstrap_->hostname.isEmpty()) bootstrap_->hostname = "homepoint-m5";
+    // Retained only as a migration/recovery fallback for older bootstrap
+    // records. Normal operation reads hostname from config.json.
+    bootstrap_->hostname = hostname;
     bootstrap_->webUsername = webUsername;
     bootstrap_->webPassword = webPassword;
 
@@ -87,27 +107,18 @@ void WebPortal::installRoutes() {
       return;
     }
 
-    if (configStore_ && configStore_->mounted()) {
-      configStore_->ensureDefaultConfig();
-    }
-
     request->send(200, "text/plain", "Saved. Rebooting into station mode.");
     requestRestart();
   });
 
   server_.on("/api/hostname", HTTP_GET, [this](AsyncWebServerRequest* request) {
     if (!authenticate(request)) return;
-    const String hostname = bootstrap_ && !bootstrap_->hostname.isEmpty()
-                                ? bootstrap_->hostname
-                                : String("homepoint-m5");
-    request->send(200, "text/plain", hostname);
+    request->send(200, "text/plain", wifi_ ? wifi_->effectiveHostname() : String());
   });
 
   server_.on("/api/status", HTTP_GET, [this](AsyncWebServerRequest* request) {
     if (!authenticate(request)) return;
-    const String hostname = bootstrap_ && !bootstrap_->hostname.isEmpty()
-                                ? bootstrap_->hostname
-                                : String("homepoint-m5");
+    const String hostname = wifi_ ? wifi_->effectiveHostname() : String();
     String body = "Host: " + hostname;
     body += " | Wi-Fi: " + wifi_->statusText() + " (" + wifi_->ipAddress() + ")";
     body += " | MQTT: " + mqtt_->statusText();
@@ -180,7 +191,26 @@ void WebPortal::installRoutes() {
           const bool ok = configStore_->saveConfigAtomically(*body, error);
           delete body;
           request->_tempObject = nullptr;
-          request->send(ok ? 200 : 400, "text/plain", ok ? "Configuration saved" : error);
+
+          bool hostnameChanged = false;
+          if (ok && wifi_) {
+            model::AppConfig savedConfig;
+            String loadError;
+            if (configStore_->load(savedConfig, loadError) &&
+                !savedConfig.hostname.isEmpty() &&
+                savedConfig.hostname != wifi_->requestedHostname()) {
+              hostnameChanged = true;
+            }
+          }
+
+          if (!ok) {
+            request->send(400, "text/plain", error);
+          } else if (hostnameChanged) {
+            request->send(200, "text/plain", "Configuration saved; hostname changed; rebooting");
+            requestRestart(1200);
+          } else {
+            request->send(200, "text/plain", "Configuration saved");
+          }
         }
       });
 

@@ -137,6 +137,7 @@ struct AppConfig {
   MqttConfig mqtt;
   UiConfig ui;
   HardwareConfig hardware;
+  String hostname;
   String timezone;
   std::vector<Tile> tiles;
 };

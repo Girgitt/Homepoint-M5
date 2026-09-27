@@ -22,6 +22,7 @@ class WifiManager {
 
   void begin(
       const config::BootstrapSettings& settings,
+      const String& stationHostname,
       StatusChangedCallback statusChanged = {});
   void tick();
 
@@ -31,6 +32,8 @@ class WifiManager {
   bool recoveryApActive() const { return recoveryApActive_; }
 
   String ipAddress() const;
+  String requestedHostname() const { return stationHostname_; }
+  String effectiveHostname() const;
   String statusText() const;
   String scanNetworksJson();
 
@@ -39,6 +42,7 @@ class WifiManager {
 
  private:
   config::BootstrapSettings settings_;
+  String stationHostname_;
   WifiState state_ = WifiState::Disconnected;
   DNSServer dns_;
 

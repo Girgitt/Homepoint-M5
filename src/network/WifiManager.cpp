@@ -23,8 +23,10 @@ void WifiManager::setState(WifiState state, bool forceNotify) {
 
 void WifiManager::begin(
     const config::BootstrapSettings& settings,
+    const String& stationHostname,
     StatusChangedCallback statusChanged) {
   settings_ = settings;
+  stationHostname_ = stationHostname;
   statusChanged_ = std::move(statusChanged);
 
   WiFi.persistent(false);
@@ -46,13 +48,27 @@ void WifiManager::begin(
 
 void WifiManager::startStation() {
   Serial.printf(
-      "[WIFI] starting station: ssid='%s' hostname='%s'\n",
+      "[WIFI] starting station: ssid='%s' requested-hostname='%s'\n",
       settings_.wifiSsid.c_str(),
-      settings_.hostname.c_str());
-  WiFi.mode(WIFI_STA);
-  if (!settings_.hostname.isEmpty()) {
-    WiFi.setHostname(settings_.hostname.c_str());
+      stationHostname_.c_str());
+
+  // Arduino-ESP32 requires the DHCP hostname to be set before the station
+  // interface is started. Resetting to WIFI_MODE_NULL first also makes a
+  // later station restart deterministic.
+  WiFi.mode(WIFI_MODE_NULL);
+  bool hostnameSet = true;
+  if (!stationHostname_.isEmpty()) {
+    hostnameSet = WiFi.setHostname(stationHostname_.c_str());
   }
+  WiFi.mode(WIFI_STA);
+
+  Serial.printf(
+      "[WIFI] station identity: requested='%s' effective='%s' set=%s mac=%s\n",
+      stationHostname_.c_str(),
+      effectiveHostname().c_str(),
+      hostnameSet ? "ok" : "failed",
+      WiFi.macAddress().c_str());
+
   WiFi.begin(settings_.wifiSsid.c_str(), settings_.wifiPassword.c_str());
 
   setState(WifiState::Connecting);
@@ -129,6 +145,12 @@ void WifiManager::tick() {
     setState(WifiState::Connecting);
     nextReconnectAt_ = now + reconnectDelayMs_;
   }
+}
+
+String WifiManager::effectiveHostname() const {
+  const char* hostname = WiFi.getHostname();
+  if (hostname && *hostname) return String(hostname);
+  return stationHostname_;
 }
 
 String WifiManager::ipAddress() const {

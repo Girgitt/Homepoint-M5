@@ -35,7 +35,8 @@ Implemented in the bootstrap:
   backward-compatible parsing of old Homepoint MQTT/scenes/sensors keys.
 - Automatic one-time import of old `wifi`, `password`, `hostname`, `login` and
   `webpass` keys from `/config.json` when the EEPROM bootstrap record is still
-  uninitialized.
+  uninitialized. The station hostname itself is authoritative in `config.json`;
+  the EEPROM copy is retained only as a migration/recovery fallback.
 - Embedded recovery/setup web pages: a damaged or missing LittleFS image does
   not remove the configuration channel.
 - Authenticated web UI with:
@@ -170,13 +171,14 @@ domains:
 ```text
 EEPROM/NVS-backed record
   Wi-Fi SSID/password
-  hostname
+  legacy hostname fallback only
   web login/password
   configured flag
         |
         +---- recovery and web access
 
 LittleFS /config.json
+  station hostname
   MQTT
   schema-v2 tiles / legacy scenes
   switch and sensor state definitions
