@@ -20,7 +20,7 @@ constexpr int kUserDetailItemsPerPage = 6;
 constexpr int kTilePressMoveTolerance = 18;
 constexpr std::uint32_t kDefaultLongPressMs = 600;
 constexpr int kUserTileVisualBottom = 72;
-constexpr int kUserCaptionHeight = 8;
+constexpr char kUserCaptionFontPath[] = "/Roboto-Medium16.vlw";
 
 std::uint16_t originalGridColor() {
   return M5.Display.color565(79, 102, 106);
@@ -92,13 +92,58 @@ void drawCenteredText(
   M5.Display.print(text);
 }
 
-int userTileCaptionY(int tileTop, int tileHeight) {
+bool beginUserCaptionFont() {
+  if (!LittleFS.exists(kUserCaptionFontPath)) return false;
+  const bool loaded = M5.Display.loadFont(LittleFS, kUserCaptionFontPath);
+  M5.Display.setTextSize(1);
+  return loaded;
+}
+
+void endUserCaptionFont(bool customFontLoaded) {
+  if (customFontLoaded) {
+    M5.Display.unloadFont();
+  }
+  M5.Display.setTextSize(1);
+}
+
+int userTileCaptionY(int tileTop, int tileHeight, int captionHeight) {
   const int remaining = tileHeight - kUserTileVisualBottom;
-  if (remaining <= kUserCaptionHeight) {
-    return tileTop + tileHeight - kUserCaptionHeight;
+  if (remaining <= captionHeight) {
+    return tileTop + tileHeight - captionHeight;
   }
   return tileTop + kUserTileVisualBottom
-      + (remaining - kUserCaptionHeight) / 2;
+      + (remaining - captionHeight) / 2;
+}
+
+void drawUserCaption(
+    const String& text,
+    int centerX,
+    int tileTop,
+    int tileHeight,
+    std::uint16_t color,
+    std::uint16_t background = TFT_BLACK) {
+  const bool customFontLoaded = beginUserCaptionFont();
+  M5.Display.setTextColor(color, background);
+  const int captionHeight = M5.Display.fontHeight();
+  const int y = userTileCaptionY(tileTop, tileHeight, captionHeight);
+  const int width = M5.Display.textWidth(text.c_str());
+  M5.Display.setCursor(centerX - width / 2, y);
+  M5.Display.print(text);
+  endUserCaptionFont(customFontLoaded);
+}
+
+void drawCenteredUserLabel(
+    const String& text,
+    int centerX,
+    int y,
+    std::uint16_t color,
+    std::uint16_t background = TFT_BLACK) {
+  const bool customFontLoaded = beginUserCaptionFont();
+  M5.Display.setTextColor(color, background);
+  const int width = M5.Display.textWidth(text.c_str());
+  M5.Display.setCursor(centerX - width / 2, y);
+  M5.Display.print(text);
+  endUserCaptionFont(customFontLoaded);
 }
 
 int gridStart(int total, int index, int count) {
@@ -934,7 +979,7 @@ void CompatUi::drawHomeTileUser(std::size_t tileIndex) {
     drawUserTileIcon(tile, centerX, y + 47, textColor);
   }
 
-  drawCenteredText(truncate(tile.name, 15), centerX, userTileCaptionY(y, tileH), textColor);
+  drawUserCaption(truncate(tile.name, 15), centerX, y, tileH, textColor);
   if (tile.type == model::TileType::Scene && tile.items.size() > 1) {
     M5.Display.setTextColor(textColor, TFT_BLACK);
     M5.Display.setTextSize(1);
@@ -1086,7 +1131,7 @@ void CompatUi::drawDetailItemUser(std::size_t itemIndex) {
       const auto color = item.switchDevice.active ? originalActiveColor() : TFT_WHITE;
       drawUserItemIcon(item, centerX, centerY - 20, color, tile.icon);
       drawCenteredText(item.switchDevice.active ? "ON" : "OFF", centerX, centerY + 28, color);
-      drawCenteredText(truncate(item.switchDevice.name, 28), centerX, centerY + 48, color);
+      drawCenteredUserLabel(truncate(item.switchDevice.name, 28), centerX, centerY + 48, color);
     } else {
       const auto& sensor = item.sensorDevice;
       M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -1100,7 +1145,7 @@ void CompatUi::drawDetailItemUser(std::size_t itemIndex) {
         M5.Display.setCursor(centerX - M5.Display.textWidth(second.c_str()) / 2, centerY + 20);
         M5.Display.print(second);
       }
-      drawCenteredText(truncate(sensor.name, 28), centerX, centerY + 54, TFT_WHITE);
+      drawCenteredUserLabel(truncate(sensor.name, 28), centerX, centerY + 54, TFT_WHITE);
     }
     return;
   }
@@ -1127,7 +1172,7 @@ void CompatUi::drawDetailItemUser(std::size_t itemIndex) {
   const String label = item.type == model::TileItemType::Switch
       ? item.switchDevice.name
       : item.sensorDevice.name;
-  drawCenteredText(truncate(label, 15), centerX, userTileCaptionY(y, tileH), color);
+  drawUserCaption(truncate(label, 15), centerX, y, tileH, color);
 }
 
 void CompatUi::drawDetailUserGrid() {
