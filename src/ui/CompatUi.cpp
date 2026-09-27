@@ -5,6 +5,7 @@
 #include <ctime>
 #include <algorithm>
 #include <limits>
+#include <utility>
 
 namespace homepoint::ui {
 namespace {
@@ -166,12 +167,14 @@ void CompatUi::begin(
     model::AppConfig* config,
     network::WifiManager* wifi,
     network::MqttManager* mqtt,
-    bool debugMode,
+    UiController* controller,
+    CommandHandler commandHandler,
     core::DeadlineScheduler* timing) {
   config_ = config;
   wifi_ = wifi;
   mqtt_ = mqtt;
-  debugMode_ = debugMode;
+  controller_ = controller;
+  commandHandler_ = std::move(commandHandler);
   timing_ = timing;
   registerTimingCallbacks();
   const auto now = millis();
@@ -190,19 +193,21 @@ void CompatUi::begin(
   stopHaptics();
   noteUserActivity(now);
   Serial.printf(
-      "[UI] mode=%s long-press=%lu ms\n",
-      debugMode_ ? "debug" : "user",
+      "[UI] backend=m5gfx mode=%s long-press=%lu ms\n",
+      debugMode() ? "debug" : "user",
       static_cast<unsigned long>(config_ ? config_->ui.longPressMs
                                          : kDefaultLongPressMs));
   applyChange(core::UiChange::full());
 }
 
+UiLayoutMetrics CompatUi::layoutMetrics(bool debugMode) const {
+  return {kTilesPerPage,
+          static_cast<std::size_t>(debugMode ? kDebugDetailItemsPerPage
+                                             : kUserDetailItemsPerPage)};
+}
+
 void CompatUi::setConfig(model::AppConfig* config) {
   config_ = config;
-  screen_ = Screen::Home;
-  selectedTile_ = 0;
-  homePage_ = 0;
-  detailPage_ = 0;
   resetHomeTilePress();
   stopHaptics();
   ensureDirtyStorage();
@@ -214,7 +219,6 @@ void CompatUi::setConfig(model::AppConfig* config) {
         "[UI] gesture config applied: long-press=%lu ms\n",
         static_cast<unsigned long>(config_->ui.longPressMs));
   }
-  screenPowerFsm_.forceAwake();
   const auto now = millis();
   resetStatusCenterCycle(now);
   lastClockMinute_ = -1;
@@ -223,12 +227,7 @@ void CompatUi::setConfig(model::AppConfig* config) {
   applyChange(core::UiChange::full());
 }
 
-void CompatUi::setDebugMode(bool enabled) {
-  if (debugMode_ == enabled) return;
-  debugMode_ = enabled;
-  screen_ = Screen::Home;
-  homePage_ = 0;
-  detailPage_ = 0;
+void CompatUi::onDisplayModeChanged() {
   resetHomeTilePress();
   stopHaptics();
   resetStatusCenterCycle(millis());
@@ -252,7 +251,7 @@ void CompatUi::applyChange(const core::UiChange& change) {
       return;
 
     case core::UiChangeKind::WifiStatus: {
-      if (debugMode_ || !wifi_ || !visualStatusSnapshotReady_) {
+      if (debugMode() || !wifi_ || !visualStatusSnapshotReady_) {
         statusLeftDirty_ = true;
         statusCenterDirty_ = true;
         return;
@@ -274,7 +273,7 @@ void CompatUi::applyChange(const core::UiChange& change) {
     }
 
     case core::UiChangeKind::MqttStatus: {
-      if (debugMode_ || !mqtt_ || !visualStatusSnapshotReady_) {
+      if (debugMode() || !mqtt_ || !visualStatusSnapshotReady_) {
         statusRightDirty_ = true;
         return;
       }
@@ -314,12 +313,12 @@ void CompatUi::ensureDirtyStorage() {
 void CompatUi::markVisibleModelItemDirty(
     std::size_t tileIndex,
     std::size_t itemIndex) {
-  if (!config_ || !message_.isEmpty() || tileIndex >= config_->tiles.size()) {
+  if (!config_ || !controller_->message().isEmpty() || tileIndex >= config_->tiles.size()) {
     return;
   }
 
-  if (screen_ == Screen::Home) {
-    const std::size_t first = homePage_ * kTilesPerPage;
+  if (controller_->screen() == UiScreen::Home) {
+    const std::size_t first = controller_->homePage() * kTilesPerPage;
     if (tileIndex >= first && tileIndex < first + kTilesPerPage) {
       if (homeTileDirty_.size() != config_->tiles.size()) ensureDirtyStorage();
       homeTileDirty_[tileIndex] = true;
@@ -327,12 +326,12 @@ void CompatUi::markVisibleModelItemDirty(
     return;
   }
 
-  if (tileIndex != selectedTile_) return;
-  const auto& tile = config_->tiles[selectedTile_];
+  if (tileIndex != controller_->selectedTile()) return;
+  const auto& tile = config_->tiles[controller_->selectedTile()];
   if (itemIndex >= tile.items.size()) return;
 
   const std::size_t perPage = detailItemsPerPage();
-  const std::size_t first = detailPage_ * perPage;
+  const std::size_t first = controller_->detailPage() * perPage;
   if (itemIndex < first || itemIndex >= first + perPage) return;
 
   if (detailItemDirty_.size() < tile.items.size()) {
@@ -431,7 +430,7 @@ void CompatUi::scheduleStatusCenterDeadline() {
   if (!timing_ || statusCenterDeadline_ == core::kInvalidDeadlineHandle) return;
 
   timing_->cancel(statusCenterDeadline_);
-  if (debugMode_ || screen_ != Screen::Home) return;
+  if (debugMode() || controller_->screen() != UiScreen::Home) return;
 
   const bool haveTime = std::time(nullptr) > 100000;
   const bool haveIp = wifi_ && wifi_->stationConnected();
@@ -456,7 +455,7 @@ void CompatUi::armScreenTimeout() {
 
   timing_->cancel(screenTimeoutDeadline_);
   if (!config_ || config_->hardware.screenSaverMinutes <= 0 ||
-      screenPowerFsm_.state() == core::ScreenPowerState::Off) {
+      controller_->screenPowerState() == core::ScreenPowerState::Off) {
     return;
   }
 
@@ -486,7 +485,7 @@ void CompatUi::noteUserActivity(std::uint32_t now) {
 }
 
 void CompatUi::updateTimedStatusInvalidation(std::uint32_t now) {
-  if (screen_ != Screen::Home) {
+  if (controller_->screen() != UiScreen::Home) {
     if (timing_ && statusCenterDeadline_ != core::kInvalidDeadlineHandle) {
       timing_->cancel(statusCenterDeadline_);
     }
@@ -504,7 +503,7 @@ void CompatUi::updateTimedStatusInvalidation(std::uint32_t now) {
   // subsequent 4s/2s cycling to the deadline service.
   if (haveTime != lastTimeAvailable_) {
     lastTimeAvailable_ = haveTime;
-    if (!debugMode_ && statusCenterCycle_.update(now, haveTime, haveIp)) {
+    if (!debugMode() && statusCenterCycle_.update(now, haveTime, haveIp)) {
       statusCenterDirty_ = true;
     }
     scheduleStatusCenterDeadline();
@@ -512,12 +511,12 @@ void CompatUi::updateTimedStatusInvalidation(std::uint32_t now) {
 
   if (backgroundStatusTiming) {
     if (statusCenterDeadlinePending_.exchange(false, std::memory_order_acq_rel)) {
-      if (!debugMode_ && statusCenterCycle_.update(now, haveTime, haveIp)) {
+      if (!debugMode() && statusCenterCycle_.update(now, haveTime, haveIp)) {
         statusCenterDirty_ = true;
       }
       scheduleStatusCenterDeadline();
     }
-  } else if (!debugMode_) {
+  } else if (!debugMode()) {
     // Safe fallback if the platform timing service could not be created.
     if (statusCenterCycle_.update(now, haveTime, haveIp)) {
       statusCenterDirty_ = true;
@@ -534,7 +533,7 @@ void CompatUi::updateTimedStatusInvalidation(std::uint32_t now) {
     const int minuteKey = local.tm_yday * 24 * 60 + local.tm_hour * 60 + local.tm_min;
     if (minuteKey != lastClockMinute_) {
       lastClockMinute_ = minuteKey;
-      if (debugMode_ || statusCenterCycle_.mode() == core::StatusCenterMode::Time) {
+      if (debugMode() || statusCenterCycle_.mode() == core::StatusCenterMode::Time) {
         statusCenterDirty_ = true;
       }
     }
@@ -558,7 +557,7 @@ void CompatUi::tick() {
 
   // A fresh touch while awake resets the idle deadline before the screen FSM
   // consumes any simultaneously delivered timeout event.
-  if (screenPowerFsm_.state() == core::ScreenPowerState::Awake &&
+  if (controller_->screenPowerState() == core::ScreenPowerState::Awake &&
       touch && touch->wasPressed()) {
     noteUserActivity(now);
   }
@@ -569,8 +568,8 @@ void CompatUi::tick() {
       ? screenTimeoutPending_.exchange(false, std::memory_order_acq_rel)
       : fallbackScreenTimeoutExpired(now);
 
-  const auto previousPowerState = screenPowerFsm_.state();
-  const auto powerStep = screenPowerFsm_.step(touchPhase, timeoutExpired);
+  const auto previousPowerState = controller_->screenPowerState();
+  const auto powerStep = controller_->stepScreenPower(touchPhase, timeoutExpired);
 
   if (powerStep.action == core::ScreenPowerAction::TurnOff) {
     Serial.println("[UI] screen FSM: AWAKE -> OFF (timeout)");
@@ -584,11 +583,11 @@ void CompatUi::tick() {
     noteUserActivity(now);
     resetStatusCenterCycle(now);
     lastClockMinute_ = -1;
-    if (screen_ == Screen::Home) statusCenterDirty_ = true;
+    if (controller_->screen() == UiScreen::Home) statusCenterDirty_ = true;
     setDisplayPowered(true);
   } else if (powerStep.stateChanged &&
              previousPowerState == core::ScreenPowerState::WakeGuard &&
-             screenPowerFsm_.state() == core::ScreenPowerState::Awake) {
+             controller_->screenPowerState() == core::ScreenPowerState::Awake) {
     Serial.println("[UI] screen FSM: WAKE_GUARD -> AWAKE (wake gesture released)");
   }
 
@@ -598,7 +597,7 @@ void CompatUi::tick() {
   // live state. This also ensures waking never exposes a stale frame.
   updateTimedStatusInvalidation(now);
 
-  if (!screenPowerFsm_.acceptsUiInput()) {
+  if (!controller_->acceptsUiInput()) {
     if (hasPendingInvalidations()) flushInvalidations(now);
     if (powerStep.consumeTouch) resetHomeTilePress();
     return;
@@ -609,12 +608,12 @@ void CompatUi::tick() {
     return;
   }
 
-  if (!message_.isEmpty()) {
+  if (!controller_->message().isEmpty()) {
     resetHomeTilePress();
   } else if (touch) {
     if (homeTilePressActive_) {
       updateHomeTilePress(*touch, now);
-    } else if (screen_ == Screen::Home && touch->wasPressed() &&
+    } else if (controller_->screen() == UiScreen::Home && touch->wasPressed() &&
                beginHomeTilePress(*touch, now)) {
       // Tile press captured. Semantic action is emitted by the generic
       // short/long-press classifier.
@@ -651,11 +650,14 @@ void CompatUi::setDisplayPowered(bool powered) {
 }
 
 int CompatUi::statusHeight() const {
-  return debugMode_ ? kDebugStatusHeight : kUserStatusHeight;
+  return debugMode() ? kDebugStatusHeight : kUserStatusHeight;
 }
 
 std::size_t CompatUi::detailItemsPerPage() const {
-  return debugMode_ ? kDebugDetailItemsPerPage : kUserDetailItemsPerPage;
+  if (!controller_) {
+    return debugMode() ? kDebugDetailItemsPerPage : kUserDetailItemsPerPage;
+  }
+  return controller_->layoutMetrics().detailItemsPerPage;
 }
 
 void CompatUi::flushInvalidations(std::uint32_t) {
@@ -673,7 +675,7 @@ void CompatUi::flushInvalidations(std::uint32_t) {
   const bool drawStatusRight = statusRightDirty_;
   statusLeftDirty_ = statusCenterDirty_ = statusRightDirty_ = false;
 
-  if (debugMode_) {
+  if (debugMode()) {
     if (drawStatusLeft || drawStatusCenter || drawStatusRight) {
       drawStatusBarDebug();
     }
@@ -689,8 +691,8 @@ void CompatUi::flushInvalidations(std::uint32_t) {
     std::fill(homeTileDirty_.begin(), homeTileDirty_.end(), false);
     std::fill(detailItemDirty_.begin(), detailItemDirty_.end(), false);
     drawContent();
-  } else if (message_.isEmpty()) {
-    if (screen_ == Screen::Home) {
+  } else if (controller_->message().isEmpty()) {
+    if (controller_->screen() == UiScreen::Home) {
       drawDirtyHomeTiles();
     } else {
       drawDirtyDetailItems();
@@ -716,11 +718,11 @@ void CompatUi::drawContent() {
   const int top = statusHeight();
   M5.Display.fillRect(0, top, M5.Display.width(), M5.Display.height() - top, TFT_BLACK);
 
-  if (!message_.isEmpty()) {
+  if (!controller_->message().isEmpty()) {
     M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
     M5.Display.setTextSize(1);
     M5.Display.setCursor(8, top + 16);
-    M5.Display.print(message_);
+    M5.Display.print(controller_->message());
     return;
   }
   if (!config_) {
@@ -730,7 +732,7 @@ void CompatUi::drawContent() {
     return;
   }
 
-  if (screen_ == Screen::Home) {
+  if (controller_->screen() == UiScreen::Home) {
     drawHome();
   } else {
     drawTileDetail();
@@ -738,7 +740,7 @@ void CompatUi::drawContent() {
 }
 
 void CompatUi::drawStatusBar() {
-  if (debugMode_) {
+  if (debugMode()) {
     drawStatusBarDebug();
   } else {
     drawStatusBarUser();
@@ -800,8 +802,8 @@ void CompatUi::drawStatusRightUser() {
 }
 
 String CompatUi::userStatusCenterText() const {
-  if (screen_ == Screen::TileDetail && config_ && selectedTile_ < config_->tiles.size()) {
-    return truncate(config_->tiles[selectedTile_].name, 30);
+  if (controller_->screen() == UiScreen::TileDetail && config_ && controller_->selectedTile() < config_->tiles.size()) {
+    return truncate(config_->tiles[controller_->selectedTile()].name, 30);
   }
 
   std::time_t now = std::time(nullptr);
@@ -835,7 +837,7 @@ void CompatUi::drawStatusCenterUser() {
 }
 
 void CompatUi::drawHome() {
-  if (debugMode_) {
+  if (debugMode()) {
     drawHomeDebug();
   } else {
     drawHomeUser();
@@ -843,7 +845,7 @@ void CompatUi::drawHome() {
 }
 
 void CompatUi::drawHomeDebug() {
-  const std::size_t first = homePage_ * kTilesPerPage;
+  const std::size_t first = controller_->homePage() * kTilesPerPage;
   for (int slot = 0; slot < kTilesPerPage; ++slot) {
     const std::size_t tileIndex = first + slot;
     if (!config_ || tileIndex >= config_->tiles.size()) break;
@@ -854,7 +856,7 @@ void CompatUi::drawHomeDebug() {
 
 void CompatUi::drawHomeTileDebug(std::size_t tileIndex) {
   if (!config_ || tileIndex >= config_->tiles.size()) return;
-  const std::size_t first = homePage_ * kTilesPerPage;
+  const std::size_t first = controller_->homePage() * kTilesPerPage;
   if (tileIndex < first || tileIndex >= first + kTilesPerPage) return;
 
   const int slot = static_cast<int>(tileIndex - first);
@@ -915,7 +917,7 @@ void CompatUi::drawHomeUser() {
   const int contentHeight = height - kUserStatusHeight - footerHeight;
   M5.Display.fillRect(0, kUserStatusHeight, width, contentHeight, TFT_BLACK);
 
-  const std::size_t first = homePage_ * kTilesPerPage;
+  const std::size_t first = controller_->homePage() * kTilesPerPage;
   for (int slot = 0; slot < kTilesPerPage; ++slot) {
     const std::size_t tileIndex = first + slot;
     if (!config_ || tileIndex >= config_->tiles.size()) continue;
@@ -927,7 +929,7 @@ void CompatUi::drawHomeUser() {
 
 void CompatUi::drawHomeTileUser(std::size_t tileIndex) {
   if (!config_ || tileIndex >= config_->tiles.size()) return;
-  const std::size_t first = homePage_ * kTilesPerPage;
+  const std::size_t first = controller_->homePage() * kTilesPerPage;
   if (tileIndex < first || tileIndex >= first + kTilesPerPage) return;
 
   const int slot = static_cast<int>(tileIndex - first);
@@ -1020,7 +1022,7 @@ void CompatUi::drawDirtyHomeTiles() {
   for (std::size_t tileIndex = 0; tileIndex < homeTileDirty_.size(); ++tileIndex) {
     if (!homeTileDirty_[tileIndex]) continue;
     homeTileDirty_[tileIndex] = false;
-    if (debugMode_) {
+    if (debugMode()) {
       drawHomeTileDebug(tileIndex);
     } else {
       drawHomeTileUser(tileIndex);
@@ -1031,13 +1033,12 @@ void CompatUi::drawDirtyHomeTiles() {
 }
 
 void CompatUi::drawTileDetail() {
-  if (!config_ || selectedTile_ >= config_->tiles.size()) {
-    screen_ = Screen::Home;
-    markNavigationDirty();
+  if (!config_ || controller_->selectedTile() >= config_->tiles.size()) {
+    drawHome();
     return;
   }
 
-  if (debugMode_) {
+  if (debugMode()) {
     drawTileDetailDebug();
   } else {
     drawTileDetailUser();
@@ -1045,14 +1046,14 @@ void CompatUi::drawTileDetail() {
 }
 
 void CompatUi::drawTileDetailDebug() {
-  auto& tile = config_->tiles[selectedTile_];
+  auto& tile = config_->tiles[controller_->selectedTile()];
   M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.setCursor(5, kDebugStatusHeight + 6);
   M5.Display.print(truncate(tile.name, 28));
 
   for (int row = 0; row < kDebugDetailItemsPerPage; ++row) {
-    const std::size_t idx = detailPage_ * kDebugDetailItemsPerPage + row;
+    const std::size_t idx = controller_->detailPage() * kDebugDetailItemsPerPage + row;
     if (idx >= tile.items.size()) break;
     drawDetailItemDebug(idx);
   }
@@ -1060,10 +1061,10 @@ void CompatUi::drawTileDetailDebug() {
 }
 
 void CompatUi::drawDetailItemDebug(std::size_t itemIndex) {
-  if (!config_ || selectedTile_ >= config_->tiles.size()) return;
-  auto& tile = config_->tiles[selectedTile_];
+  if (!config_ || controller_->selectedTile() >= config_->tiles.size()) return;
+  auto& tile = config_->tiles[controller_->selectedTile()];
   if (itemIndex >= tile.items.size()) return;
-  const std::size_t first = detailPage_ * kDebugDetailItemsPerPage;
+  const std::size_t first = controller_->detailPage() * kDebugDetailItemsPerPage;
   if (itemIndex < first || itemIndex >= first + kDebugDetailItemsPerPage) return;
 
   constexpr int firstY = kDebugStatusHeight + 28;
@@ -1099,7 +1100,7 @@ void CompatUi::drawDetailItemDebug(std::size_t itemIndex) {
 }
 
 void CompatUi::drawTileDetailUser() {
-  const auto& tile = config_->tiles[selectedTile_];
+  const auto& tile = config_->tiles[controller_->selectedTile()];
   const int width = M5.Display.width();
   const int height = M5.Display.height();
   const int contentTop = kUserStatusHeight;
@@ -1112,7 +1113,7 @@ void CompatUi::drawTileDetailUser() {
     return;
   }
 
-  const std::size_t first = detailPage_ * kUserDetailItemsPerPage;
+  const std::size_t first = controller_->detailPage() * kUserDetailItemsPerPage;
   for (int slot = 0; slot < kUserDetailItemsPerPage; ++slot) {
     const std::size_t idx = first + slot;
     if (idx >= tile.items.size()) continue;
@@ -1123,8 +1124,8 @@ void CompatUi::drawTileDetailUser() {
 }
 
 void CompatUi::drawDetailItemUser(std::size_t itemIndex) {
-  if (!config_ || selectedTile_ >= config_->tiles.size()) return;
-  const auto& tile = config_->tiles[selectedTile_];
+  if (!config_ || controller_->selectedTile() >= config_->tiles.size()) return;
+  const auto& tile = config_->tiles[controller_->selectedTile()];
   if (itemIndex >= tile.items.size()) return;
 
   const int width = M5.Display.width();
@@ -1160,7 +1161,7 @@ void CompatUi::drawDetailItemUser(std::size_t itemIndex) {
     return;
   }
 
-  const std::size_t first = detailPage_ * kUserDetailItemsPerPage;
+  const std::size_t first = controller_->detailPage() * kUserDetailItemsPerPage;
   if (itemIndex < first || itemIndex >= first + kUserDetailItemsPerPage) return;
   const int slot = static_cast<int>(itemIndex - first);
   const int col = slot % kColumns;
@@ -1206,12 +1207,12 @@ void CompatUi::drawDirtyDetailItems() {
   for (std::size_t itemIndex = 0; itemIndex < detailItemDirty_.size(); ++itemIndex) {
     if (!detailItemDirty_[itemIndex]) continue;
     detailItemDirty_[itemIndex] = false;
-    if (debugMode_) {
+    if (debugMode()) {
       drawDetailItemDebug(itemIndex);
     } else {
       drawDetailItemUser(itemIndex);
-      if (config_ && selectedTile_ < config_->tiles.size()) {
-        const auto& tile = config_->tiles[selectedTile_];
+      if (config_ && controller_->selectedTile() < config_->tiles.size()) {
+        const auto& tile = config_->tiles[controller_->selectedTile()];
         redrewGridItem = !(tile.items.size() == 1 && tile.type != model::TileType::Scene);
       }
     }
@@ -1221,7 +1222,7 @@ void CompatUi::drawDirtyDetailItems() {
 
 void CompatUi::drawFooter() {
   if (!footerVisible()) return;
-  if (debugMode_) {
+  if (debugMode()) {
     drawFooterDebug();
   } else {
     drawFooterUser();
@@ -1391,22 +1392,22 @@ void CompatUi::drawCloudIcon(int centerX, int centerY, std::uint16_t color) {
 }
 
 void CompatUi::drawFooterSymbol(
-    FooterAction action,
+    core::UiNavigationAction action,
     int centerX,
     int centerY,
     std::uint16_t color) {
   switch (action) {
-    case FooterAction::Previous:
+    case core::UiNavigationAction::Previous:
       M5.Display.drawLine(centerX + 5, centerY - 7, centerX - 4, centerY, color);
       M5.Display.drawLine(centerX - 4, centerY, centerX + 5, centerY + 7, color);
       break;
 
-    case FooterAction::Next:
+    case core::UiNavigationAction::Next:
       M5.Display.drawLine(centerX - 5, centerY - 7, centerX + 4, centerY, color);
       M5.Display.drawLine(centerX + 4, centerY, centerX - 5, centerY + 7, color);
       break;
 
-    case FooterAction::Home:
+    case core::UiNavigationAction::Home:
       M5.Display.drawTriangle(
           centerX - 8, centerY,
           centerX, centerY - 7,
@@ -1415,31 +1416,21 @@ void CompatUi::drawFooterSymbol(
       M5.Display.drawRect(centerX - 6, centerY, 12, 8, color);
       break;
 
-    case FooterAction::Back:
+    case core::UiNavigationAction::Back:
       M5.Display.drawLine(centerX - 7, centerY, centerX + 7, centerY, color);
       M5.Display.drawLine(centerX - 7, centerY, centerX - 1, centerY - 6, color);
       M5.Display.drawLine(centerX - 7, centerY, centerX - 1, centerY + 6, color);
       break;
 
-    case FooterAction::None:
-      break;
   }
 }
 
 bool CompatUi::footerVisible() const {
-  if (screen_ == Screen::TileDetail) {
-    return true;
-  }
-  return homePageCount() > 1;
-}
-
-std::size_t CompatUi::homePageCount() const {
-  if (!config_ || config_->tiles.empty()) return 1;
-  return (config_->tiles.size() + kTilesPerPage - 1) / kTilesPerPage;
+  return controller_ && controller_->footerVisible();
 }
 
 void CompatUi::handleTouch(const m5::touch_detail_t& touch) {
-  if (screen_ == Screen::Home) {
+  if (controller_->screen() == UiScreen::Home) {
     handleHomeTouch(touch.x, touch.y);
   } else {
     handleDetailTouch(touch.x, touch.y);
@@ -1469,7 +1460,7 @@ bool CompatUi::beginHomeTilePress(
       core::PressPhase::Pressed,
       now,
       config_ ? config_->ui.longPressMs : kDefaultLongPressMs);
-  triggerHaptic(core::HapticCue::Press, now);
+  dispatchIntent(core::UiIntent::tilePressStarted(tileIndex), now);
   return true;
 }
 
@@ -1496,9 +1487,6 @@ void CompatUi::updateHomeTilePress(
       now,
       config_ ? config_->ui.longPressMs : kDefaultLongPressMs);
 
-  if (event == core::PressGesture::LongPress) {
-    triggerHaptic(core::HapticCue::LongPress, now);
-  }
   dispatchHomeTileGesture(event);
 
   if (phase == core::PressPhase::Released || !tilePressGesture_.active()) {
@@ -1515,9 +1503,15 @@ void CompatUi::dispatchHomeTileGesture(core::PressGesture event) {
   const auto gesture = event == core::PressGesture::ShortPress
       ? core::TileGesture::ShortPress
       : core::TileGesture::LongPress;
-  const auto behavior = tileBehaviorForTile(config_->tiles[homeTilePressTile_]);
-  const auto action = core::resolveTileAction(behavior, gesture);
-  executeTileAction(homeTilePressTile_, gesture, action);
+  const auto result = dispatchIntent(
+      core::UiIntent::tileGestureIntent(homeTilePressTile_, gesture),
+      millis());
+  Serial.printf(
+      "[UI] tile gesture: tile=%u type=%u gesture=%s action=%s\n",
+      static_cast<unsigned>(homeTilePressTile_),
+      static_cast<unsigned>(config_->tiles[homeTilePressTile_].type),
+      tileGestureText(gesture),
+      tileActionText(result.tileAction));
 }
 
 void CompatUi::resetHomeTilePress() {
@@ -1596,57 +1590,27 @@ bool CompatUi::hitTestHomeTile(
   const int row = gridIndex(y - top, contentHeight, kRows);
   const int slot = row * kColumns + col;
 
-  tileIndex = homePage_ * kTilesPerPage + slot;
+  tileIndex = controller_->homePage() * kTilesPerPage + slot;
   return tileIndex < config_->tiles.size();
 }
 
-core::TileBehavior CompatUi::tileBehaviorForTile(
-    const model::Tile& tile) const {
-  if (tile.switchCount() > 0) {
-    return {core::TileAction::Toggle, core::TileAction::OpenDetail};
+UiIntentResult CompatUi::dispatchIntent(
+    const core::UiIntent& intent,
+    std::uint32_t now) {
+  if (!controller_) return {};
+  const auto result = controller_->handleIntent(intent);
+  if (result.hasHapticCue) triggerHaptic(result.hapticCue, now);
+  if (result.command.kind != UiCommandKind::None && commandHandler_) {
+    commandHandler_(result.command);
   }
-
-  return {core::TileAction::OpenDetail, core::TileAction::OpenDetail};
-}
-
-void CompatUi::executeTileAction(
-    std::size_t tileIndex,
-    core::TileGesture gesture,
-    core::TileAction action) {
-  if (!config_ || tileIndex >= config_->tiles.size()) return;
-  auto& tile = config_->tiles[tileIndex];
-
-  Serial.printf(
-      "[UI] tile gesture: tile=%u type=%u gesture=%s action=%s\n",
-      static_cast<unsigned>(tileIndex),
-      static_cast<unsigned>(tile.type),
-      tileGestureText(gesture),
-      tileActionText(action));
-
-  switch (action) {
-    case core::TileAction::Toggle:
-      if (mqtt_) mqtt_->switchTile(tile.id, !tile.allSwitchesOn());
-      break;
-
-    case core::TileAction::OpenDetail:
-      selectedTile_ = tileIndex;
-      detailPage_ = 0;
-      screen_ = Screen::TileDetail;
-      break;
-
-    case core::TileAction::None:
-    case core::TileAction::Activate:
-    case core::TileAction::SetValue:
-      break;
-  }
-
-  if (action == core::TileAction::OpenDetail) {
+  if (result.navigationChanged) {
     applyChange(core::UiChange::navigation());
   }
+  return result;
 }
 
 void CompatUi::handleDetailTouch(int x, int y) {
-  if (debugMode_) {
+  if (debugMode()) {
     handleDetailTouchDebug(x, y);
   } else {
     handleDetailTouchUser(x, y);
@@ -1654,16 +1618,14 @@ void CompatUi::handleDetailTouch(int x, int y) {
 }
 
 void CompatUi::handleDetailTouchDebug(int x, int y) {
-  if (!config_ || selectedTile_ >= config_->tiles.size()) return;
-  auto& tile = config_->tiles[selectedTile_];
+  if (!config_ || controller_->selectedTile() >= config_->tiles.size()) return;
+  auto& tile = config_->tiles[controller_->selectedTile()];
   const int height = M5.Display.height();
 
   if (y >= height - kFooterHeight) {
     handleFooterTouch(x);
     return;
   }
-
-  if (!mqtt_) return;
 
   constexpr int firstY = kDebugStatusHeight + 28;
   constexpr int rowHeight = 42;
@@ -1671,19 +1633,18 @@ void CompatUi::handleDetailTouchDebug(int x, int y) {
   const int row = (y - firstY) / rowHeight;
   if (row < 0 || row >= kDebugDetailItemsPerPage) return;
 
-  const std::size_t idx = detailPage_ * kDebugDetailItemsPerPage + row;
+  const std::size_t idx = controller_->detailPage() * kDebugDetailItemsPerPage + row;
   if (idx >= tile.items.size()) return;
-  auto& item = tile.items[idx];
+  const auto& item = tile.items[idx];
   if (item.type != model::TileItemType::Switch) return;
-
-  auto& device = item.switchDevice;
-  triggerHaptic(core::HapticCue::Press, millis());
-  mqtt_->switchTileItem(tile.id, item.id, !device.active);
+  dispatchIntent(
+      core::UiIntent::toggleTileItem(controller_->selectedTile(), idx),
+      millis());
 }
 
 void CompatUi::handleDetailTouchUser(int x, int y) {
-  if (!config_ || selectedTile_ >= config_->tiles.size()) return;
-  auto& tile = config_->tiles[selectedTile_];
+  if (!config_ || controller_->selectedTile() >= config_->tiles.size()) return;
+  auto& tile = config_->tiles[controller_->selectedTile()];
   const int width = M5.Display.width();
   const int height = M5.Display.height();
 
@@ -1691,13 +1652,14 @@ void CompatUi::handleDetailTouchUser(int x, int y) {
     handleFooterTouch(x);
     return;
   }
-  if (y < kUserStatusHeight || !mqtt_) return;
+  if (y < kUserStatusHeight) return;
 
   if (tile.items.size() == 1 && tile.type != model::TileType::Scene) {
-    auto& item = tile.items.front();
+    const auto& item = tile.items.front();
     if (item.type == model::TileItemType::Switch) {
-      triggerHaptic(core::HapticCue::Press, millis());
-      mqtt_->switchTileItem(tile.id, item.id, !item.switchDevice.active);
+      dispatchIntent(
+          core::UiIntent::toggleTileItem(controller_->selectedTile(), 0),
+          millis());
     }
     return;
   }
@@ -1706,13 +1668,14 @@ void CompatUi::handleDetailTouchUser(int x, int y) {
   const int col = gridIndex(x, width, kColumns);
   const int row = gridIndex(y - kUserStatusHeight, contentHeight, kRows);
   const int slot = row * kColumns + col;
-  const std::size_t idx = detailPage_ * kUserDetailItemsPerPage + slot;
+  const std::size_t idx = controller_->detailPage() * kUserDetailItemsPerPage + slot;
   if (idx >= tile.items.size()) return;
 
-  auto& item = tile.items[idx];
+  const auto& item = tile.items[idx];
   if (item.type != model::TileItemType::Switch) return;
-  triggerHaptic(core::HapticCue::Press, millis());
-  mqtt_->switchTileItem(tile.id, item.id, !item.switchDevice.active);
+  dispatchIntent(
+      core::UiIntent::toggleTileItem(controller_->selectedTile(), idx),
+      millis());
 }
 
 void CompatUi::handleFooterTouch(int x) {
@@ -1722,7 +1685,6 @@ void CompatUi::handleFooterTouch(int x) {
   const auto action = footerActionForSlot(slot);
   if (!footerActionEnabled(action)) return;
 
-  triggerHaptic(core::HapticCue::Press, millis());
   executeFooterAction(action);
 }
 
@@ -1733,113 +1695,42 @@ CompatUi::FooterSlot CompatUi::footerSlotForX(int x) const {
   return FooterSlot::Right;
 }
 
-CompatUi::FooterAction CompatUi::footerActionForSlot(FooterSlot slot) const {
-  if (screen_ == Screen::Home) {
+core::UiNavigationAction CompatUi::footerActionForSlot(FooterSlot slot) const {
+  if (controller_->screen() == UiScreen::Home) {
     switch (slot) {
-      case FooterSlot::Left: return FooterAction::Previous;
-      case FooterSlot::Center: return FooterAction::Home;
-      case FooterSlot::Right: return FooterAction::Next;
+      case FooterSlot::Left: return core::UiNavigationAction::Previous;
+      case FooterSlot::Center: return core::UiNavigationAction::Home;
+      case FooterSlot::Right: return core::UiNavigationAction::Next;
     }
   }
 
   switch (slot) {
-    case FooterSlot::Left: return FooterAction::Previous;
-    case FooterSlot::Center: return FooterAction::Back;
-    case FooterSlot::Right: return FooterAction::Next;
+    case FooterSlot::Left: return core::UiNavigationAction::Previous;
+    case FooterSlot::Center: return core::UiNavigationAction::Back;
+    case FooterSlot::Right: return core::UiNavigationAction::Next;
   }
-  return FooterAction::None;
+  return core::UiNavigationAction::Home;
 }
 
-bool CompatUi::footerActionEnabled(FooterAction action) const {
-  if (!config_) return false;
-
-  switch (action) {
-    case FooterAction::None:
-      return false;
-
-    case FooterAction::Home:
-      return true;
-
-    case FooterAction::Back:
-      return screen_ == Screen::TileDetail;
-
-    case FooterAction::Previous:
-      return screen_ == Screen::Home ? homePage_ > 0 : detailPage_ > 0;
-
-    case FooterAction::Next:
-      if (screen_ == Screen::Home) {
-        return homePage_ + 1 < homePageCount();
-      }
-
-      if (selectedTile_ >= config_->tiles.size()) return false;
-      {
-        const auto& tile = config_->tiles[selectedTile_];
-        const std::size_t perPage = detailItemsPerPage();
-        const std::size_t pages = tile.items.empty()
-            ? 1
-            : (tile.items.size() + perPage - 1) / perPage;
-        return detailPage_ + 1 < pages;
-      }
-  }
-  return false;
+bool CompatUi::footerActionEnabled(core::UiNavigationAction action) const {
+  return controller_ && controller_->navigationEnabled(action);
 }
 
-void CompatUi::executeFooterAction(FooterAction action) {
-  switch (action) {
-    case FooterAction::Previous:
-      if (screen_ == Screen::Home) {
-        if (homePage_ > 0) --homePage_;
-      } else if (detailPage_ > 0) {
-        --detailPage_;
-      }
-      break;
-
-    case FooterAction::Home:
-      screen_ = Screen::Home;
-      homePage_ = 0;
-      detailPage_ = 0;
-      break;
-
-    case FooterAction::Back:
-      screen_ = Screen::Home;
-      detailPage_ = 0;
-      break;
-
-    case FooterAction::Next:
-      if (screen_ == Screen::Home) {
-        ++homePage_;
-      } else {
-        ++detailPage_;
-      }
-      break;
-
-    case FooterAction::None:
-      return;
+void CompatUi::executeFooterAction(core::UiNavigationAction action) {
+  const auto result = dispatchIntent(core::UiIntent::navigate(action), millis());
+  if (result.handled) {
+    Serial.printf("[UI] footer action: %s\n", footerActionLabel(action));
   }
-
-  Serial.printf("[UI] footer action: %s\n", footerActionLabel(action));
-  applyChange(core::UiChange::navigation());
 }
 
-const char* CompatUi::footerActionLabel(FooterAction action) {
+const char* CompatUi::footerActionLabel(core::UiNavigationAction action) {
   switch (action) {
-    case FooterAction::Previous: return "< Prev";
-    case FooterAction::Home: return "Home";
-    case FooterAction::Back: return "Back";
-    case FooterAction::Next: return "Next >";
-    case FooterAction::None: return "";
+    case core::UiNavigationAction::Previous: return "< Prev";
+    case core::UiNavigationAction::Home: return "Home";
+    case core::UiNavigationAction::Back: return "Back";
+    case core::UiNavigationAction::Next: return "Next >";
   }
   return "";
-}
-
-void CompatUi::showMessage(const String& message) {
-  message_ = message;
-  applyChange(core::UiChange::message());
-}
-
-void CompatUi::clearMessage() {
-  message_ = "";
-  applyChange(core::UiChange::message());
 }
 
 String CompatUi::truncate(const String& value, std::size_t maxChars) {

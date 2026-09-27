@@ -105,23 +105,28 @@ void App::setup() {
   mqtt_.begin(
       &config_,
       [this](const model::ModelChange& change) {
-        ui_.applyChange(core::UiChange::modelItem(
+        uiBackend_->applyChange(core::UiChange::modelItem(
             change.tileIndex, change.itemIndex));
       },
       [this]() {
         mqttStatusPending_.store(true, std::memory_order_relaxed);
       });
 
-  ui_.begin(
+  uiController_.begin(
+      &config_,
+      bootstrap_.debugUi,
+      m5gfxUi_.layoutMetrics(bootstrap_.debugUi));
+  m5gfxUi_.begin(
       &config_,
       &wifi_,
       &mqtt_,
-      bootstrap_.debugUi,
+      &uiController_,
+      [this](const ui::UiCommand& command) { executeUiCommand(command); },
       timingReady ? &timing_ : nullptr);
   if (!bootstrap_.configured) {
-    ui_.showMessage("Setup AP: HomePoint-Config\nOpen 192.168.99.1");
+    showUiMessage("Setup AP: HomePoint-Config\nOpen 192.168.99.1");
   } else if (!configValid_) {
-    ui_.showMessage(configMessage_);
+    showUiMessage(configMessage_);
   }
 
   web_.begin(
@@ -144,7 +149,7 @@ void App::loop() {
   maybeConfigureTime();
   processPendingUiStatusChanges();
   processPendingUiControls();
-  ui_.tick();
+  uiBackend_->tick();
   displayCapture_.service();
 
   delay(5);
@@ -152,10 +157,10 @@ void App::loop() {
 
 void App::processPendingUiStatusChanges() {
   if (wifiStatusPending_.exchange(false, std::memory_order_relaxed)) {
-    ui_.applyChange(core::UiChange::wifiStatus());
+    uiBackend_->applyChange(core::UiChange::wifiStatus());
   }
   if (mqttStatusPending_.exchange(false, std::memory_order_relaxed)) {
-    ui_.applyChange(core::UiChange::mqttStatus());
+    uiBackend_->applyChange(core::UiChange::mqttStatus());
   }
 }
 
@@ -165,7 +170,7 @@ void App::reloadConfiguration() {
   if (!configStore_.load(candidate, error)) {
     configValid_ = false;
     configMessage_ = String("Reload failed: ") + error;
-    ui_.showMessage(configMessage_);
+    showUiMessage(configMessage_);
     return;
   }
 
@@ -183,8 +188,11 @@ void App::reloadConfiguration() {
 
   applyHardwareConfig();
   mqtt_.reconfigure(&config_);
-  ui_.setConfig(&config_);
-  ui_.clearMessage();
+  uiController_.setConfig(
+      &config_,
+      uiBackend_->layoutMetrics(uiController_.debugMode()));
+  uiBackend_->setConfig(&config_);
+  clearUiMessage();
   timeConfigured_ = false;
 }
 
@@ -227,8 +235,45 @@ void App::processPendingUiControls() {
   if (pending < 0) return;
 
   const bool enabled = pending != 0;
-  ui_.setDebugMode(enabled);
+  if (uiController_.debugMode() == enabled) return;
+  uiController_.setDebugMode(enabled, uiBackend_->layoutMetrics(enabled));
+  uiBackend_->onDisplayModeChanged();
   Serial.printf("[UI] display mode changed: %s\n", enabled ? "debug" : "user");
+}
+
+void App::showUiMessage(const String& message) {
+  uiController_.setMessage(message);
+  uiBackend_->applyChange(core::UiChange::message());
+}
+
+void App::clearUiMessage() {
+  uiController_.clearMessage();
+  uiBackend_->applyChange(core::UiChange::message());
+}
+
+void App::executeUiCommand(const ui::UiCommand& command) {
+  if (command.kind == ui::UiCommandKind::None ||
+      command.tileIndex >= config_.tiles.size()) {
+    return;
+  }
+
+  const auto& tile = config_.tiles[command.tileIndex];
+  switch (command.kind) {
+    case ui::UiCommandKind::SetTileSwitchState:
+      mqtt_.switchTile(tile.id, command.targetOn);
+      return;
+
+    case ui::UiCommandKind::SetTileItemSwitchState:
+      if (command.itemIndex >= tile.items.size()) return;
+      mqtt_.switchTileItem(
+          tile.id,
+          tile.items[command.itemIndex].id,
+          command.targetOn);
+      return;
+
+    case ui::UiCommandKind::None:
+      return;
+  }
 }
 
 void App::applyHardwareConfig() {

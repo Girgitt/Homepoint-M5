@@ -11,6 +11,8 @@
 #include "../system/EspDeadlineScheduler.h"
 #include "../system/M5DisplayCapture.h"
 #include "../ui/CompatUi.h"
+#include "../ui/UiBackend.h"
+#include "../ui/UiController.h"
 #include "../web/WebPortal.h"
 
 namespace homepoint::app {
@@ -31,7 +33,9 @@ class App {
   web::WebPortal web_;
   homepoint::system::EspDeadlineScheduler timing_;
   homepoint::system::M5DisplayCapture displayCapture_;
-  ui::CompatUi ui_;
+  ui::UiController uiController_;
+  ui::CompatUi m5gfxUi_;
+  ui::UiBackend* uiBackend_ = &m5gfxUi_;
 
   bool configValid_ = false;
   bool timeConfigured_ = false;
@@ -48,6 +52,9 @@ class App {
   void processPendingUiStatusChanges();
   void processPendingUiControls();
   void setDebugUi(bool enabled);
+  void showUiMessage(const String& message);
+  void clearUiMessage();
+  void executeUiCommand(const ui::UiCommand& command);
 };
 
 }  // namespace homepoint::app
