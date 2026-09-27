@@ -201,9 +201,8 @@ void App::maybeConfigureTime() {
 
   if (timeConfigured_ || config_.timezone.isEmpty()) return;
 
-  setenv("TZ", config_.timezone.c_str(), 1);
-  tzset();
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  Serial.printf("[TIME] configuring SNTP timezone='%s'\n", config_.timezone.c_str());
+  configTzTime(config_.timezone.c_str(), "pool.ntp.org", "time.nist.gov");
   timeConfigured_ = true;
 }
 

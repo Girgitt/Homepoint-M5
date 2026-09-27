@@ -114,7 +114,7 @@ configuration.
 | `mqttbroker` | string | Empty disables MQTT. |
 | `mqttusername` | string | Empty means connect without MQTT username/password. |
 | `mqttpasswd` | string | Used when `mqttusername` is non-empty. |
-| `timezone` | string | Passed to the normal application time configuration. |
+| `timezone` | string | POSIX TZ string passed to Arduino `configTzTime()`. |
 | `tiles` | array | Native schema-v2 dashboard entries. |
 | `scenes` | array | Legacy compatibility input. |
 | `ui` | object | UI behavior settings. |
@@ -127,6 +127,19 @@ configuration.
 | `ledPinPullup` | boolean | Legacy-compatible field, default `false`. |
 | `touchXAxisInverted` | boolean | Legacy-compatible field, default `false`. |
 | `touchYAxisInverted` | boolean | Legacy-compatible field, default `true`. |
+
+### Timezone syntax
+
+`timezone` uses the POSIX `TZ` format expected by `configTzTime()`, not an
+ordinary signed UTC offset. POSIX offset signs are reversed: `CET-1` means
+UTC+1 and `CEST-2` means UTC+2. For Poland / Central Europe the example:
+
+```text
+CET-1CEST-2,M3.5.0/02:00:00,M10.5.0/03:00:00
+```
+
+selects CET (UTC+1) in winter and CEST (UTC+2) in summer, with the DST
+transition rules encoded in the same string.
 
 ## MQTT broker syntax
 
