@@ -1,0 +1,84 @@
+#include <unity.h>
+
+void test_crc16_ibm_known_vector();
+
+void test_haptic_press_pulse_is_bounded();
+void test_haptic_long_press_restarts_feedback_window();
+void test_haptic_stop_turns_active_pulse_off_immediately();
+
+void test_screen_power_timeout_turns_display_off();
+void test_screen_power_wake_gesture_is_consumed_through_release();
+void test_screen_power_does_not_sleep_under_active_touch();
+
+void test_press_gesture_short_press_on_release_before_threshold();
+void test_press_gesture_long_press_emits_once_and_consumes_release();
+void test_press_gesture_cancel_suppresses_action_until_release();
+
+void test_tile_behavior_resolves_gestures_independently_of_tile_type();
+
+void test_status_center_cycle_uses_four_seconds_time_two_seconds_ip();
+void test_status_center_cycle_handles_single_available_source();
+
+void test_ui_change_preserves_model_item_coordinates();
+
+void test_ui_controller_home_paging_and_navigation_bounds();
+void test_ui_controller_back_returns_to_originating_home_page();
+void test_ui_controller_home_action_returns_to_first_page();
+void test_ui_controller_short_switch_press_emits_target_state_command();
+void test_ui_controller_scene_toggle_uses_all_switch_state();
+void test_ui_controller_long_press_opens_detail_and_requests_long_haptic();
+void test_ui_controller_sensor_short_press_opens_detail_without_command();
+void test_ui_controller_detail_item_toggle_emits_item_command();
+void test_ui_controller_rejects_non_switch_and_out_of_range_items();
+void test_ui_controller_detail_paging_respects_layout_metrics();
+void test_ui_controller_footer_visibility_tracks_navigation_context();
+void test_ui_controller_display_mode_change_does_not_wake_sleeping_screen();
+void test_ui_controller_config_replacement_resets_navigation_and_wakes_screen();
+void test_ui_controller_layout_change_clamps_invalid_pages();
+void test_ui_controller_message_state_round_trips();
+
+void setUp() {}
+void tearDown() {}
+
+int main(int, char**) {
+  UNITY_BEGIN();
+
+  RUN_TEST(test_crc16_ibm_known_vector);
+
+  RUN_TEST(test_haptic_press_pulse_is_bounded);
+  RUN_TEST(test_haptic_long_press_restarts_feedback_window);
+  RUN_TEST(test_haptic_stop_turns_active_pulse_off_immediately);
+
+  RUN_TEST(test_screen_power_timeout_turns_display_off);
+  RUN_TEST(test_screen_power_wake_gesture_is_consumed_through_release);
+  RUN_TEST(test_screen_power_does_not_sleep_under_active_touch);
+
+  RUN_TEST(test_press_gesture_short_press_on_release_before_threshold);
+  RUN_TEST(test_press_gesture_long_press_emits_once_and_consumes_release);
+  RUN_TEST(test_press_gesture_cancel_suppresses_action_until_release);
+
+  RUN_TEST(test_tile_behavior_resolves_gestures_independently_of_tile_type);
+
+  RUN_TEST(test_status_center_cycle_uses_four_seconds_time_two_seconds_ip);
+  RUN_TEST(test_status_center_cycle_handles_single_available_source);
+
+  RUN_TEST(test_ui_change_preserves_model_item_coordinates);
+
+  RUN_TEST(test_ui_controller_home_paging_and_navigation_bounds);
+  RUN_TEST(test_ui_controller_back_returns_to_originating_home_page);
+  RUN_TEST(test_ui_controller_home_action_returns_to_first_page);
+  RUN_TEST(test_ui_controller_short_switch_press_emits_target_state_command);
+  RUN_TEST(test_ui_controller_scene_toggle_uses_all_switch_state);
+  RUN_TEST(test_ui_controller_long_press_opens_detail_and_requests_long_haptic);
+  RUN_TEST(test_ui_controller_sensor_short_press_opens_detail_without_command);
+  RUN_TEST(test_ui_controller_detail_item_toggle_emits_item_command);
+  RUN_TEST(test_ui_controller_rejects_non_switch_and_out_of_range_items);
+  RUN_TEST(test_ui_controller_detail_paging_respects_layout_metrics);
+  RUN_TEST(test_ui_controller_footer_visibility_tracks_navigation_context);
+  RUN_TEST(test_ui_controller_display_mode_change_does_not_wake_sleeping_screen);
+  RUN_TEST(test_ui_controller_config_replacement_resets_navigation_and_wakes_screen);
+  RUN_TEST(test_ui_controller_layout_change_clamps_invalid_pages);
+  RUN_TEST(test_ui_controller_message_state_round_trips);
+
+  return UNITY_END();
+}

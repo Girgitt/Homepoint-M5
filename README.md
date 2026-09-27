@@ -105,6 +105,9 @@ Run the repository verification contract:
 ./scripts/verify.sh
 ```
 
+For the native-vs-hardware test split and the manual Core2 smoke-test scope,
+see [`docs/TESTING.md`](docs/TESTING.md).
+
 The firmware can boot without `uploadfs`: it creates a minimal
 `/config.json` on first successful LittleFS mount, and the setup/recovery page
 is embedded in firmware.

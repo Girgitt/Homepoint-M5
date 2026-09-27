@@ -5,5 +5,8 @@ cd "$ROOT"
 
 command -v pio >/dev/null || { echo "PlatformIO (pio) is required" >&2; exit 2; }
 
-pio test -e native
+echo "== Native regression tests =="
+scripts/test-native.sh
+
+echo "== Core2 firmware build =="
 pio run -e m5stack-core2
