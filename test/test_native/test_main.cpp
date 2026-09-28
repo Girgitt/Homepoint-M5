@@ -2,6 +2,15 @@
 
 void test_crc16_ibm_known_vector();
 
+void test_dashboard_codec_accepts_and_normalizes_complete_draft();
+void test_dashboard_codec_rejects_unknown_sensor_type();
+void test_dashboard_codec_rejects_incompatible_json_types();
+void test_dashboard_codec_rejects_duplicate_ids_and_short_scenes();
+void test_dashboard_codec_refuses_lossy_legacy_scene();
+void test_dashboard_codec_serializes_lossless_legacy_scene_with_warning();
+void test_dashboard_codec_marks_last_good_recovery();
+void test_dashboard_codec_replace_tiles_preserves_unrelated_config();
+
 void test_haptic_press_pulse_is_bounded();
 void test_haptic_long_press_restarts_feedback_window();
 void test_haptic_stop_turns_active_pulse_off_immediately();
@@ -44,6 +53,15 @@ int main(int, char**) {
   UNITY_BEGIN();
 
   RUN_TEST(test_crc16_ibm_known_vector);
+
+  RUN_TEST(test_dashboard_codec_accepts_and_normalizes_complete_draft);
+  RUN_TEST(test_dashboard_codec_rejects_unknown_sensor_type);
+  RUN_TEST(test_dashboard_codec_rejects_incompatible_json_types);
+  RUN_TEST(test_dashboard_codec_rejects_duplicate_ids_and_short_scenes);
+  RUN_TEST(test_dashboard_codec_refuses_lossy_legacy_scene);
+  RUN_TEST(test_dashboard_codec_serializes_lossless_legacy_scene_with_warning);
+  RUN_TEST(test_dashboard_codec_marks_last_good_recovery);
+  RUN_TEST(test_dashboard_codec_replace_tiles_preserves_unrelated_config);
 
   RUN_TEST(test_haptic_press_pulse_is_bounded);
   RUN_TEST(test_haptic_long_press_restarts_feedback_window);

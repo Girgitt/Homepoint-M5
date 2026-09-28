@@ -1,6 +1,9 @@
 #pragma once
 
 #include <Arduino.h>
+
+#include <cstddef>
+#include <cstdint>
 #include <vector>
 
 namespace homepoint::model {

@@ -172,6 +172,23 @@ validation rules, switch/sensor/scene examples, MQTT URI syntax and legacy
 migration examples. The repository starter configuration is
 [`data/config.example.json`](data/config.example.json).
 
+The web-facing dashboard editor uses a deliberately smaller configuration API
+instead of per-tile CRUD endpoints:
+
+```text
+GET  /api/dashboard
+POST /api/dashboard/validate
+PUT  /api/dashboard
+```
+
+The browser edits one complete dashboard draft. The editor API applies strict
+schema-v2 type/enum validation before persistence; a successful PUT atomically
+replaces only the dashboard portion of the application configuration, preserves
+unrelated and unknown top-level configuration, and queues a main-task runtime
+reload. GET also reports whether content came from the active or last-good
+configuration and refuses legacy zero/one-member scenes rather than performing
+a lossy implicit migration.
+
 ## Persistence model
 
 Bootstrap settings and application configuration have different failure

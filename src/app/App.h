@@ -42,10 +42,13 @@ class App {
   bool previousWifiConnected_ = false;
   std::atomic<bool> wifiStatusPending_{false};
   std::atomic<bool> mqttStatusPending_{false};
+  std::atomic<bool> configReloadPending_{false};
   std::atomic<int> pendingDebugUi_{-1};
   String configMessage_;
 
   void reloadConfiguration();
+  void queueConfigurationReload();
+  void processPendingConfigurationReload();
   void resolveConfiguredHostname();
   void applyHardwareConfig();
   void maybeConfigureTime();

@@ -54,13 +54,17 @@ M5Stack Core2. It tests deterministic application logic, including:
 - status-bar time/IP cycling;
 - semantic `UiChange` addressing;
 - tile behavior resolution;
+- strict dashboard-editor request parsing and normalization;
+- dashboard scene cardinality, duplicate IDs and sensor-type/type validation;
+- lossless legacy-dashboard handling and last-good recovery metadata;
+- dashboard replacement preserving unrelated and unknown configuration fields;
 - `UiController` navigation, command generation, haptic intent, detail paging,
   display-mode behavior, configuration replacement and screen-power behavior.
 
-`UiController.cpp` itself is compiled into the native test binary. The native
-suite uses `test/test_native/stubs/Arduino.h` only to provide the small `String`
-surface required by the existing application model. This stub is not visible
-to firmware builds.
+`UiController.cpp` and the pure `DashboardCodec.cpp` are compiled into the native
+test binary. The native environment pins ArduinoJson as a host dependency.
+`test/test_native/stubs/Arduino.h` provides only the small `String` surface
+required by the application model. This stub is not visible to firmware builds.
 
 ## Core2 firmware build
 

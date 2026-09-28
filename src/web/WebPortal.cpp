@@ -48,6 +48,26 @@ String uploadStagePath(const AsyncWebServerRequest* request) {
   return String("/.__hpm5_upload_") + suffix + ".tmp";
 }
 
+String jsonError(const String& message) {
+  JsonDocument document;
+  document["error"] = message.c_str();
+  String body;
+  serializeJson(document, body);
+  return body;
+}
+
+int dashboardStatusCode(config::DashboardResult result) {
+  switch (result) {
+    case config::DashboardResult::Ok: return 200;
+    case config::DashboardResult::InvalidRequest: return 400;
+    case config::DashboardResult::StorageUnavailable: return 503;
+    case config::DashboardResult::Conflict: return 409;
+    case config::DashboardResult::InsufficientMemory: return 507;
+    case config::DashboardResult::IoError: return 500;
+  }
+  return 500;
+}
+
 }  // namespace
 
 WebPortal::WebPortal() = default;
@@ -277,6 +297,48 @@ void WebPortal::installRoutes() {
             request->send(200, "text/plain", "Configuration saved");
           }
         }
+      });
+
+  server_.on("/api/dashboard", HTTP_GET, [this](AsyncWebServerRequest* request) {
+    if (!authenticate(request)) return;
+    String body;
+    String error;
+    const auto result = configStore_->getDashboardJson(body, error);
+    if (result != config::DashboardResult::Ok) {
+      request->send(dashboardStatusCode(result), "application/json", jsonError(error));
+      return;
+    }
+    request->send(200, "application/json", body);
+  });
+
+  server_.on(
+      "/api/dashboard/validate", HTTP_POST,
+      [this](AsyncWebServerRequest* request) {
+        if (!authenticate(request)) return;
+        if (request->contentLength() == 0) {
+          request->send(
+              400, "application/json", jsonError("Dashboard body must not be empty"));
+        }
+      },
+      nullptr,
+      [this](AsyncWebServerRequest* request, std::uint8_t* data,
+             std::size_t len, std::size_t index, std::size_t total) {
+        handleDashboardBody(request, data, len, index, total, false);
+      });
+
+  server_.on(
+      "/api/dashboard", HTTP_PUT,
+      [this](AsyncWebServerRequest* request) {
+        if (!authenticate(request)) return;
+        if (request->contentLength() == 0) {
+          request->send(
+              400, "application/json", jsonError("Dashboard body must not be empty"));
+        }
+      },
+      nullptr,
+      [this](AsyncWebServerRequest* request, std::uint8_t* data,
+             std::size_t len, std::size_t index, std::size_t total) {
+        handleDashboardBody(request, data, len, index, total, true);
       });
 
   server_.on("/api/files", HTTP_GET, [this](AsyncWebServerRequest* request) {
@@ -677,6 +739,65 @@ void WebPortal::installCaptiveRoutes() {
     }
     request->send(404, "text/plain", "Not found");
   });
+}
+
+void WebPortal::handleDashboardBody(
+    AsyncWebServerRequest* request,
+    std::uint8_t* data,
+    std::size_t len,
+    std::size_t index,
+    std::size_t total,
+    bool persist) {
+  if (!authenticate(request)) return;
+
+  const bool bodyRangeInvalid = index > total || len > total - index;
+  if (total == 0 || total > kMaxEditableTextBytes || bodyRangeInvalid) {
+    if (index == 0) {
+      request->send(
+          total > kMaxEditableTextBytes ? 413 : 400,
+          "application/json",
+          jsonError(
+              total > kMaxEditableTextBytes
+                  ? "Dashboard is limited to 128 KiB"
+                  : "Invalid dashboard request body"));
+    }
+    return;
+  }
+
+  if (index == 0) {
+    auto* body = static_cast<char*>(allocateRequestBuffer(total + 1u));
+    if (!body) {
+      request->send(
+          507, "application/json",
+          jsonError("Not enough memory to buffer dashboard"));
+      return;
+    }
+    body[total] = '\0';
+    request->_tempObject = body;
+  }
+
+  auto* body = static_cast<char*>(request->_tempObject);
+  if (!body) return;
+  std::memcpy(body + index, data, len);
+
+  if (index + len != total) return;
+
+  String normalized;
+  String error;
+  const auto result = persist
+      ? configStore_->saveDashboardAtomically(body, total, normalized, error)
+      : configStore_->validateDashboard(body, total, normalized, error);
+  free(body);
+  request->_tempObject = nullptr;
+
+  if (result != config::DashboardResult::Ok) {
+    request->send(
+        dashboardStatusCode(result), "application/json", jsonError(error));
+    return;
+  }
+
+  if (persist && reloadCallback_) reloadCallback_();
+  request->send(200, "application/json", normalized);
 }
 
 String WebPortal::normalizeUploadPath(const String& filename) {

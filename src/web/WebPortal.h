@@ -47,6 +47,13 @@ class WebPortal {
   void requestRestart(std::uint32_t delayMs = 700);
   void installRoutes();
   void installCaptiveRoutes();
+  void handleDashboardBody(
+      AsyncWebServerRequest* request,
+      std::uint8_t* data,
+      std::size_t len,
+      std::size_t index,
+      std::size_t total,
+      bool persist);
 
   static String normalizeUploadPath(const String& filename);
   static String normalizePath(const String& path);

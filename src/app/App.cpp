@@ -136,7 +136,7 @@ void App::setup() {
       &wifi_,
       &mqtt_,
       displayCaptureReady ? &displayCapture_ : nullptr,
-      [this]() { reloadConfiguration(); },
+      [this]() { queueConfigurationReload(); },
       [this](bool enabled) { setDebugUi(enabled); });
 }
 
@@ -146,6 +146,7 @@ void App::loop() {
   wifi_.tick();
   mqtt_.tick();
   web_.tick();
+  processPendingConfigurationReload();
   maybeConfigureTime();
   processPendingUiStatusChanges();
   processPendingUiControls();
@@ -153,6 +154,19 @@ void App::loop() {
   displayCapture_.service();
 
   delay(5);
+}
+
+void App::queueConfigurationReload() {
+  // WebPortal callbacks execute on the AsyncWebServer task. Defer config,
+  // MQTT and UI mutations to the main application task so the renderer stays
+  // single-threaded (and remains safe for the planned LVGL backend).
+  configReloadPending_.store(true, std::memory_order_release);
+  Serial.println("[CONFIG] reload queued");
+}
+
+void App::processPendingConfigurationReload() {
+  if (!configReloadPending_.exchange(false, std::memory_order_acq_rel)) return;
+  reloadConfiguration();
 }
 
 void App::processPendingUiStatusChanges() {

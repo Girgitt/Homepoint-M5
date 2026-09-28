@@ -1,5 +1,6 @@
 #include "ConfigStore.h"
 
+#include <cstring>
 #include <utility>
 
 namespace homepoint::config {
@@ -217,7 +218,15 @@ bool ConfigStore::validateAndParse(
   JsonDocument document;
   const auto result = deserializeJson(document, json, length);
   if (result) {
-    error = String("JSON parse error: ") + result.c_str();
+    if (result == DeserializationError::NoMemory) {
+      error = "Not enough memory to parse configuration JSON";
+    } else {
+      error = String("JSON parse error: ") + result.c_str();
+    }
+    return false;
+  }
+  if (document.overflowed()) {
+    error = "Not enough memory to parse configuration JSON";
     return false;
   }
   if (!document.is<JsonObject>()) {
@@ -611,6 +620,203 @@ bool ConfigStore::saveConfigAtomically(
 
   error = "";
   return true;
+}
+
+bool ConfigStore::loadEditableDocument(
+    JsonDocument& document,
+    model::AppConfig& config,
+    bool& recoveredFromLastGood,
+    String& error) const {
+  recoveredFromLastGood = false;
+  if (!mounted_) {
+    error = "LittleFS is not mounted";
+    return false;
+  }
+
+  auto loadPath = [&](const char* path, String& pathError) -> bool {
+    document.clear();
+    if (!LittleFS.exists(path)) {
+      pathError = String(path) + " does not exist";
+      return false;
+    }
+
+    const String text = readFile(path);
+    const auto result = deserializeJson(document, text);
+    if (result) {
+      if (result == DeserializationError::NoMemory) {
+        pathError = String("Not enough memory to parse ") + path;
+      } else {
+        pathError = String("JSON parse error in ") + path + ": " + result.c_str();
+      }
+      document.clear();
+      return false;
+    }
+    if (document.overflowed()) {
+      pathError = String("Not enough memory to parse ") + path;
+      document.clear();
+      return false;
+    }
+    if (!document.is<JsonObject>()) {
+      pathError = String(path) + " top-level JSON value must be an object";
+      document.clear();
+      return false;
+    }
+    if (!parseDocument(document, config, pathError)) {
+      document.clear();
+      return false;
+    }
+    return true;
+  };
+
+  String activeError;
+  if (loadPath(kConfigPath, activeError)) {
+    error = "";
+    return true;
+  }
+
+  String lastGoodError;
+  if (loadPath(kLastGoodPath, lastGoodError)) {
+    recoveredFromLastGood = true;
+    error = "";
+    return true;
+  }
+
+  error = String("No valid base configuration: ") + activeError;
+  if (!lastGoodError.isEmpty()) {
+    error += String("; last-good: ") + lastGoodError;
+  }
+  return false;
+}
+
+bool ConfigStore::looksLikeMemoryError(const String& error) {
+  return std::strstr(error.c_str(), "Not enough memory") != nullptr;
+}
+
+DashboardResult ConfigStore::getDashboardJson(String& json, String& error) const {
+  if (!mounted_) {
+    error = "LittleFS is not mounted";
+    return DashboardResult::StorageUnavailable;
+  }
+
+  JsonDocument source;
+  model::AppConfig config;
+  bool recoveredFromLastGood = false;
+  if (!loadEditableDocument(source, config, recoveredFromLastGood, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::Conflict;
+  }
+  if (!DashboardCodec::serialize(
+          config,
+          recoveredFromLastGood ? DashboardSource::LastGood : DashboardSource::Active,
+          json, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::Conflict;
+  }
+  return DashboardResult::Ok;
+}
+
+DashboardResult ConfigStore::validateDashboard(
+    const char* json,
+    std::size_t length,
+    String& normalizedJson,
+    String& error) const {
+  model::AppConfig dashboardConfig;
+  if (!DashboardCodec::parseRequest(json, length, dashboardConfig, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::InvalidRequest;
+  }
+  if (!DashboardCodec::serialize(dashboardConfig, DashboardSource::Draft, normalizedJson, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::InvalidRequest;
+  }
+  return DashboardResult::Ok;
+}
+
+DashboardResult ConfigStore::saveDashboardAtomically(
+    const char* json,
+    std::size_t length,
+    String& normalizedJson,
+    String& error) {
+  if (!mounted_) {
+    error = "LittleFS is not mounted";
+    return DashboardResult::StorageUnavailable;
+  }
+
+  model::AppConfig dashboardConfig;
+  if (!DashboardCodec::parseRequest(json, length, dashboardConfig, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::InvalidRequest;
+  }
+
+  // Build the successful response before opening/copying the complete
+  // application configuration. This also proves that the normalized dashboard
+  // itself is serializable before any persistence occurs.
+  String normalizedCandidate;
+  if (!DashboardCodec::serialize(
+          dashboardConfig, DashboardSource::Active, normalizedCandidate, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::InvalidRequest;
+  }
+
+  String mergedJson;
+  {
+    JsonDocument currentDocument;
+    bool recoveredFromLastGood = false;
+    {
+      model::AppConfig baseConfig;
+      if (!loadEditableDocument(
+              currentDocument, baseConfig, recoveredFromLastGood, error)) {
+        return looksLikeMemoryError(error)
+            ? DashboardResult::InsufficientMemory
+            : DashboardResult::Conflict;
+      }
+    }
+
+    if (!DashboardCodec::replaceTiles(
+            currentDocument, dashboardConfig.tiles, error)) {
+      return looksLikeMemoryError(error)
+          ? DashboardResult::InsufficientMemory
+          : DashboardResult::Conflict;
+    }
+
+    // The tile data now lives in currentDocument. Release the parsed browser
+    // model before constructing the full merged AppConfig.
+    dashboardConfig = model::AppConfig{};
+
+    {
+      model::AppConfig validatedMergedConfig;
+      if (!parseDocument(currentDocument, validatedMergedConfig, error)) {
+        return DashboardResult::Conflict;
+      }
+    }
+
+    if (currentDocument.overflowed()) {
+      error = "Not enough memory to merge dashboard into configuration";
+      return DashboardResult::InsufficientMemory;
+    }
+
+    const std::size_t mergedBytes = measureJsonPretty(currentDocument);
+    if (!mergedJson.reserve(mergedBytes + 1u)) {
+      error = "Not enough memory to allocate merged configuration";
+      return DashboardResult::InsufficientMemory;
+    }
+    serializeJsonPretty(currentDocument, mergedJson);
+  }  // release the complete JsonDocument before saveConfigAtomically reparses
+
+  if (!saveConfigAtomically(mergedJson.c_str(), mergedJson.length(), error)) {
+    if (looksLikeMemoryError(error)) return DashboardResult::InsufficientMemory;
+    return DashboardResult::IoError;
+  }
+
+  normalizedJson = normalizedCandidate;
+  error = "";
+  return DashboardResult::Ok;
 }
 
 bool ConfigStore::saveTextFileAtomically(

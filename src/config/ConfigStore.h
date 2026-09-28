@@ -5,9 +5,19 @@
 #include <LittleFS.h>
 
 #include "PersistentSettings.h"
+#include "DashboardCodec.h"
 #include "../model/Model.h"
 
 namespace homepoint::config {
+
+enum class DashboardResult {
+  Ok,
+  InvalidRequest,
+  StorageUnavailable,
+  Conflict,
+  InsufficientMemory,
+  IoError,
+};
 
 class ConfigStore {
  public:
@@ -20,6 +30,13 @@ class ConfigStore {
   bool saveConfigAtomically(const String& json, String& error);
   bool saveConfigAtomically(
       const char* json, std::size_t length, String& error);
+  DashboardResult getDashboardJson(String& json, String& error) const;
+  DashboardResult validateDashboard(
+      const char* json, std::size_t length,
+      String& normalizedJson, String& error) const;
+  DashboardResult saveDashboardAtomically(
+      const char* json, std::size_t length,
+      String& normalizedJson, String& error);
   bool saveTextFileAtomically(const String& path, const String& text, String& error);
   bool saveTextFileAtomically(
       const String& path, const char* text, std::size_t length, String& error);
@@ -57,6 +74,10 @@ class ConfigStore {
   bool validateAndParse(const String& json, model::AppConfig& config, String& error) const;
   bool validateAndParse(
       const char* json, std::size_t length, model::AppConfig& config, String& error) const;
+  bool loadEditableDocument(
+      JsonDocument& document, model::AppConfig& config,
+      bool& recoveredFromLastGood, String& error) const;
+  static bool looksLikeMemoryError(const String& error);
   bool replaceStagedFileAtomically(
       const String& stagedPath, const String& path, String& error);
   void appendFiles(JsonArray files, const char* dirname, std::uint8_t depth) const;

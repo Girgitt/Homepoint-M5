@@ -9,6 +9,85 @@ hostname, but it is used only as a one-way migration/recovery fallback.
 
 The current application schema is **schema version 2**.
 
+## Dashboard editor API
+
+The dashboard editor intentionally works with a whole-dashboard document rather
+than exposing firmware-side per-tile CRUD operations:
+
+```text
+GET  /api/dashboard
+POST /api/dashboard/validate
+PUT  /api/dashboard
+```
+
+`GET` returns a normalized editable representation plus modest capability and
+source metadata. `POST /api/dashboard/validate` strictly validates a complete
+browser draft and returns the normalized representation without persisting it.
+`PUT` validates the same document, merges only its dashboard into the existing
+application configuration, saves through the normal atomic/last-good path, and
+queues a runtime reload on the main application task.
+
+Example envelope:
+
+```json
+{
+  "schemaVersion": 2,
+  "dashboard": {
+    "tiles": []
+  },
+  "capabilities": {
+    "tileTypes": ["switch", "sensor", "scene"],
+    "sceneItemTypes": ["switch", "sensor"],
+    "sensorTypes": ["singleValue", "combinedValues"],
+    "maxVisibleTiles": 6,
+    "minSceneItems": 2
+  },
+  "source": {
+    "configuration": "active",
+    "legacy": false
+  },
+  "warnings": []
+}
+```
+
+Clients may send the complete GET response back after editing; `capabilities`,
+`source`, and `warnings` are informational and are ignored on validation/save.
+Unrelated `/config.json` fields such as MQTT, hostname, UI and hardware settings
+are preserved, including unknown future top-level fields. The API does not
+expose live MQTT operations, so selecting or editing a dashboard item cannot
+accidentally control equipment.
+
+Editor validation is intentionally stricter than the legacy boot-time
+compatibility loader. Present fields must have the documented JSON type,
+`sensorType` must be exactly `singleValue` or `combinedValues`, tile IDs must be
+strings, and scene/item type names must be recognized. This prevents browser
+mistakes such as `"jsondata": "true"` or a misspelled sensor type from being
+silently converted to defaults.
+
+`source.configuration` reports whether a response represents the active
+`config.json`, recovered `config.lastgood.json`, or a validation-only `draft`.
+Recovery and legacy conversion are also listed in `warnings`, so the editor can
+make those states visible instead of silently hiding them.
+
+Reading a legacy configuration does not rewrite it. Legacy scenes with two or
+more members can be represented losslessly as schema-v2 scenes and are exposed
+that way with a migration warning; the migration becomes persistent only after
+a successful PUT. Legacy scenes with zero or one member are **not** collapsed
+to a direct tile because that would discard either scene-level or device-level
+name/icon information. In that case GET returns a conflict error and the raw
+configuration must be corrected/migrated before the structured editor is used.
+
+The dashboard endpoints use distinct status classes so the browser can separate
+user errors from device/storage failures:
+
+- `400` — malformed or schema-invalid editor draft;
+- `409` — the stored configuration cannot be represented/merged safely (for
+  example a lossy legacy scene shape);
+- `413` — request exceeds the 128 KiB editor-body limit;
+- `500` — persistence/activation I/O failure;
+- `503` — LittleFS is unavailable;
+- `507` — request/JSON/output allocation could not be satisfied.
+
 ## Schema selection and backward compatibility
 
 Configuration parsing follows these rules:

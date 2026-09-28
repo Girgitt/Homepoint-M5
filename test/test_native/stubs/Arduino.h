@@ -20,7 +20,56 @@ class String {
 
   const char* c_str() const { return value_.c_str(); }
   std::size_t length() const { return value_.length(); }
+  std::size_t size() const { return value_.size(); }
   bool isEmpty() const { return value_.empty(); }
+
+  bool reserve(std::size_t size) {
+    try {
+      value_.reserve(size);
+      return true;
+    } catch (...) {
+      return false;
+    }
+  }
+
+  bool concat(const char* data, std::size_t size) {
+    if (!data) return true;
+    try {
+      value_.append(data, size);
+      return true;
+    } catch (...) {
+      return false;
+    }
+  }
+
+  bool concat(const char* data) {
+    if (!data) return true;
+    try {
+      value_ += data;
+      return true;
+    } catch (...) {
+      return false;
+    }
+  }
+
+  bool concat(char value) {
+    try {
+      value_.push_back(value);
+      return true;
+    } catch (...) {
+      return false;
+    }
+  }
+
+  String& operator+=(char value) {
+    value_.push_back(value);
+    return *this;
+  }
+
+  String& operator+=(const char* value) {
+    if (value) value_ += value;
+    return *this;
+  }
 
   bool operator==(const String& other) const { return value_ == other.value_; }
   bool operator!=(const String& other) const { return !(*this == other); }
