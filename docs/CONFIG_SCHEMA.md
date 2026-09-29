@@ -7,7 +7,7 @@ the versioned bootstrap record so an invalid application configuration does not
 remove recovery/web access. Older bootstrap records may still contain a
 hostname, but it is used only as a one-way migration/recovery fallback.
 
-The current application schema is **schema version 2**.
+The current application schema is **schema version 3**. Schema version 2 remains readable and is upgraded only by an explicit user action.
 
 ## Dashboard editor API
 
@@ -18,6 +18,12 @@ than exposing firmware-side per-tile CRUD operations:
 GET  /api/dashboard
 POST /api/dashboard/validate
 PUT  /api/dashboard
+GET  /api/layouts
+GET  /api/layout?file=layout_<name>.json
+POST /api/layout/validate?file=...&name=...
+PUT  /api/layout?file=...&name=...
+PUT  /api/dashboard/source
+POST /api/dashboard/upgrade
 ```
 
 `GET` returns a normalized editable representation plus modest capability and
@@ -31,7 +37,7 @@ Example envelope:
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "dashboard": {
     "tiles": []
   },
@@ -44,7 +50,8 @@ Example envelope:
   },
   "source": {
     "configuration": "active",
-    "legacy": false
+    "legacy": false,
+    "layout": "inline"
   },
   "warnings": []
 }
@@ -74,8 +81,22 @@ more members can be represented losslessly as schema-v2 scenes and are exposed
 that way with a migration warning; the migration becomes persistent only after
 a successful PUT. Legacy scenes with zero or one member are **not** collapsed
 to a direct tile because that would discard either scene-level or device-level
-name/icon information. In that case GET returns a conflict error and the raw
-configuration must be corrected/migrated before the structured editor is used.
+name/icon information during an ordinary read/save. In that case GET returns a
+conflict error, but the explicit **Upgrade schema** action remains available.
+Upgrade intentionally converts a one-device legacy scene to the corresponding
+direct switch/sensor tile. The visible scene-level `name` and `icon` are kept
+for the direct tile, while MQTT/value/sensor fields come from the sole legacy
+device. A zero-device legacy scene still cannot be migrated and must be
+corrected in the raw configuration first.
+
+The typed layout endpoints deliberately own managed `layout_*.json` files. The
+generic file editor can display those files but cannot overwrite/delete them;
+this keeps filename validation, layout-schema validation, atomic persistence and
+last-good handling on one code path. `/api/layouts` reports both the currently
+active source and all discovered managed layouts. Saving an inactive layout does
+not reload the runtime. `PUT /api/dashboard/source` performs the explicit
+activation/copy-inline operation, while `POST /api/dashboard/upgrade` performs
+the explicit legacy/schema-v2-to-v3 externalization.
 
 The dashboard endpoints use distinct status classes so the browser can separate
 user errors from device/storage failures:
@@ -92,33 +113,83 @@ user errors from device/storage failures:
 
 Configuration parsing follows these rules:
 
-1. `schemaVersion: 2` and a `tiles` array -> parse the native schema-v2 tile
-   format.
-2. `schemaVersion: 2`, no `tiles`, but a `scenes` array -> accept the old
+1. `schemaVersion: 3` and `tiles` as an array -> parse an inline dashboard.
+2. `schemaVersion: 3` and `tiles` as a string -> resolve the named managed
+   `layout_*.json` file and use its tile definition.
+3. `schemaVersion: 2` and a `tiles` array -> parse the schema-v2 inline tile
+   format without rewriting it.
+4. `schemaVersion: 2`, no `tiles`, but a `scenes` array -> accept the old
    Homepoint scene format as a compatibility fallback.
-3. Missing `schemaVersion`, or `schemaVersion: 1` -> parse the legacy `scenes`
-   format.
-4. A schema version newer than the firmware supports -> reject the
+5. Missing `schemaVersion`, or `schemaVersion: 1` -> parse legacy `scenes`.
+6. A schema version newer than the firmware supports -> reject the
    configuration instead of guessing its meaning.
 
-Legacy configuration is **not rewritten automatically**. Both formats are
-normalized into the same runtime tile model after parsing.
+Normal dashboard Save does not silently promote schema v2 to v3. The web editor
+provides an explicit **Upgrade schema** action that materializes the current
+effective dashboard as a layout file and then changes `config.json` to reference
+it. The same action is available for the legacy implicit-v1 `scenes` format;
+one-device legacy scenes are deliberately converted to direct tiles as part of
+that explicit migration.
 
-A new configuration should use:
+A new configuration should use schema v3, either inline:
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "hostname": "homepoint-m5",
   "tiles": []
 }
 ```
 
-## Complete schema-v2 example
+or with an external layout reference:
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
+  "hostname": "homepoint-m5",
+  "tiles": "layout_ground_floor.json"
+}
+```
+
+### External layout documents
+
+Managed layout filenames must match `layout_[A-Za-z0-9_-]+.json`. The file
+contains a separate required human-readable `name`, so display names are not
+constrained by filesystem naming rules. The name is trimmed, must not be empty,
+and is limited to 96 characters:
+
+```json
+{
+  "kind": "homepoint-layout",
+  "schemaVersion": 1,
+  "name": "Ground Floor / Office",
+  "tiles": [
+    {
+      "id": "desk-lamp",
+      "type": "switch",
+      "name": "Desk Lamp",
+      "getTopic": "lights/desk/state",
+      "setTopic": "lights/desk/set"
+    }
+  ]
+}
+```
+
+Each layout uses its own atomic staging and last-good recovery files. These
+managed transaction files are hidden from the generic file editor. A valid
+`config.json` may therefore recover an invalid active layout independently from
+`config.lastgood.json`.
+
+The dashboard editor distinguishes the file being edited from the source active
+on the device. Saving an inactive layout does not reload runtime state;
+activation is explicit. **Use inline copy** copies a selected layout into the
+schema-v3 inline `tiles` array while keeping the layout file.
+
+## Complete schema-v3 inline example
+
+```json
+{
+  "schemaVersion": 3,
   "hostname": "homepoint-m5",
 
   "mqttbroker": "mqtt://192.168.2.1:1883",
@@ -193,12 +264,12 @@ configuration.
 
 | Field | Type | Default / behavior |
 | --- | --- | --- |
-| `schemaVersion` | integer | Missing means legacy/implicit v1. Current native schema is `2`. |
+| `schemaVersion` | integer | Missing means legacy/implicit v1. Current native schema is `3`; schema v2 remains readable. |
 | `mqttbroker` | string | Empty disables MQTT. |
 | `mqttusername` | string | Empty means connect without MQTT username/password. |
 | `mqttpasswd` | string | Used when `mqttusername` is non-empty. |
 | `timezone` | string | POSIX TZ string passed to Arduino `configTzTime()`. |
-| `tiles` | array | Native schema-v2 dashboard entries. |
+| `tiles` | array or string | Schema v3: inline dashboard array or `layout_*.json` reference. Schema v2: inline array only. |
 | `scenes` | array | Legacy compatibility input. |
 | `ui` | object | UI behavior settings. |
 | `screenSaverMinutes` | integer | Default `10`. |
@@ -266,7 +337,7 @@ intended to limit future tile types such as dimmers.
 
 ## Tile types
 
-Schema v2 currently supports `switch`, `sensor`, and `scene` tiles.
+The schema-v2/v3 native tile grammar supports `switch`, `sensor`, and `scene` tiles.
 
 ### Direct switch tile
 
@@ -365,7 +436,7 @@ Validation and defaults:
 - with `jsondata: false`, the whole payload is stored in the first value;
 - `name` defaults to `"Unnamed"`.
 
-In schema v2, `type` identifies the tile or scene item itself, so the old
+In the native schema-v2/v3 tile grammar, `type` identifies the tile or scene item itself, so the old
 sensor value-shape field named `type` has been renamed to `sensorType`.
 
 ### Scene tile
@@ -400,7 +471,7 @@ A scene is a real multi-item dashboard group:
 Rules:
 
 - `items` is required and must be an array;
-- a schema-v2 scene must contain **at least two items**;
+- a native schema-v2/v3 scene must contain **at least two items**;
 - current scene-item types are `switch` and `sensor`;
 - a one-device dashboard entry should instead be represented directly as a
   `switch` or `sensor` tile;
@@ -412,8 +483,9 @@ members are display/state entries and are not published to.
 
 ## Tile order and paging
 
-The order of objects in `tiles` is the dashboard order. There is no separate
-dashboard-layout registry in schema v2.
+The order of objects in `tiles` is the dashboard order. Schema v2 stores that
+array only inline. Schema v3 can keep it inline or resolve it from one managed
+external layout file; the runtime model is identical after resolution.
 
 The compatibility UI currently shows six dashboard tiles per page. Its lower
 navigation bar is hidden when all tiles fit on one page, allowing the tiles to
@@ -477,8 +549,10 @@ not silently converted into a direct schema-v2 device tile.
 
 Migration is intentionally explicit rather than automatic.
 
-For a legacy scene containing exactly one device, create a direct tile. For
-example, convert:
+For a legacy scene containing exactly one device, create a direct tile. Preserve
+the scene-level `name` and `icon`, because those values identify what the user
+actually saw on the dashboard; copy the MQTT/value/sensor fields from the sole
+device. For example, convert:
 
 ```json
 {
@@ -502,7 +576,7 @@ into:
 {
   "id": "desk-lamp",
   "type": "switch",
-  "name": "Desk Lamp",
+  "name": "Desk",
   "setTopic": "lights/desk/set",
   "getTopic": "lights/desk/state",
   "onValue": "ON",
@@ -561,11 +635,21 @@ draft. Editing is intentionally separated from operation of real equipment:
 - **Revert** restores the last GET/successful-save representation held by the
   browser.
 
+For schema-v3 layout sources, the selector at the top of the editor identifies
+what is being edited independently from what the device is currently using.
+`+ New layout` copies the current draft into a new named `layout_*.json` file,
+**Set as active** changes `config.json` to schema v3 and references the selected
+persisted layout, and **Use inline copy** copies the selected persisted layout
+back into a schema-v3 inline `config.json`. **Upgrade schema** is offered for an older inline configuration
+and creates a named external layout before changing `config.json` to schema v3.
+A layout recovered from its last-good backup must be saved (repairing its active
+file) before it can be newly activated.
+
 The editor reads `tileTypes`, `sceneItemTypes`, `sensorTypes`,
 `maxVisibleTiles`, and `minSceneItems` from the API capability envelope. Device
 source warnings, including last-good recovery and lossless legacy conversion,
 are displayed above the editor rather than hidden.
 
-This editor is configuration-only. Runtime/live-state visualization and an
-explicit operate mode are separate later slices; 0029 deliberately does not add
-browser-to-MQTT control paths.
+This editor remains configuration-only after the schema-v3/layout-source slice.
+Runtime/live-state visualization and an explicit operate mode are separate later
+slices; no browser-to-MQTT control path is introduced here.

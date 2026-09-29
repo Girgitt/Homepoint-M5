@@ -8,11 +8,21 @@ void test_dashboard_codec_rejects_incompatible_json_types();
 void test_dashboard_codec_rejects_duplicate_ids_and_short_scenes();
 void test_dashboard_codec_refuses_lossy_legacy_scene();
 void test_dashboard_codec_serializes_lossless_legacy_scene_with_warning();
+void test_dashboard_codec_prepares_explicit_legacy_upgrade();
+void test_dashboard_codec_rejects_empty_legacy_scene_upgrade();
 void test_dashboard_codec_marks_last_good_recovery();
 void test_dashboard_codec_replace_tiles_preserves_unrelated_config();
+void test_dashboard_codec_accepts_schema_v3_editor_envelope();
+void test_dashboard_codec_serializes_external_layout_source();
+void test_dashboard_codec_replace_tiles_can_preserve_schema_v2();
+
+void test_layout_codec_accepts_named_layout_with_spaces();
+void test_layout_codec_rejects_invalid_identity_and_name();
+void test_layout_filename_contract();
 
 void test_admin_page_contains_hybrid_dashboard_editor();
 void test_admin_page_uses_whole_dashboard_api_without_live_control();
+void test_admin_page_contains_layout_source_management();
 
 void test_haptic_press_pulse_is_bounded();
 void test_haptic_long_press_restarts_feedback_window();
@@ -63,11 +73,21 @@ int main(int, char**) {
   RUN_TEST(test_dashboard_codec_rejects_duplicate_ids_and_short_scenes);
   RUN_TEST(test_dashboard_codec_refuses_lossy_legacy_scene);
   RUN_TEST(test_dashboard_codec_serializes_lossless_legacy_scene_with_warning);
+  RUN_TEST(test_dashboard_codec_prepares_explicit_legacy_upgrade);
+  RUN_TEST(test_dashboard_codec_rejects_empty_legacy_scene_upgrade);
   RUN_TEST(test_dashboard_codec_marks_last_good_recovery);
   RUN_TEST(test_dashboard_codec_replace_tiles_preserves_unrelated_config);
+  RUN_TEST(test_dashboard_codec_accepts_schema_v3_editor_envelope);
+  RUN_TEST(test_dashboard_codec_serializes_external_layout_source);
+  RUN_TEST(test_dashboard_codec_replace_tiles_can_preserve_schema_v2);
+
+  RUN_TEST(test_layout_codec_accepts_named_layout_with_spaces);
+  RUN_TEST(test_layout_codec_rejects_invalid_identity_and_name);
+  RUN_TEST(test_layout_filename_contract);
 
   RUN_TEST(test_admin_page_contains_hybrid_dashboard_editor);
   RUN_TEST(test_admin_page_uses_whole_dashboard_api_without_live_control);
+  RUN_TEST(test_admin_page_contains_layout_source_management);
 
   RUN_TEST(test_haptic_press_pulse_is_bounded);
   RUN_TEST(test_haptic_long_press_restarts_feedback_window);

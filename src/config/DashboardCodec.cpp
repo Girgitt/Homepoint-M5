@@ -232,9 +232,13 @@ bool DashboardCodec::parseRequest(
 
   JsonObjectConst root = request.as<JsonObjectConst>();
   JsonVariantConst schema = root["schemaVersion"];
-  if (!schema.is<int>() ||
-      schema.as<int>() != model::AppConfig::kCurrentSchemaVersion) {
-    setError(error, "Dashboard API requires schemaVersion 2");
+  if (!schema.is<int>()) {
+    setError(error, "Dashboard API requires an integer schemaVersion");
+    return false;
+  }
+  const int schemaVersion = schema.as<int>();
+  if (schemaVersion < 2 || schemaVersion > model::AppConfig::kCurrentSchemaVersion) {
+    setError(error, "Dashboard API supports schemaVersion 2 or 3");
     return false;
   }
 
@@ -250,12 +254,29 @@ bool DashboardCodec::parseRequest(
   }
 
   model::AppConfig parsed;
-  parsed.schemaVersion = model::AppConfig::kCurrentSchemaVersion;
+  parsed.schemaVersion = schemaVersion;
   parsed.loadedFromLegacyScenes = false;
+  if (!parseTiles(
+          tilesValue.as<JsonArrayConst>(), parsed.tiles, error, "dashboard.tiles")) {
+    return false;
+  }
 
+  config = std::move(parsed);
+  error = "";
+  return true;
+}
+
+bool DashboardCodec::parseTiles(
+    JsonArrayConst tiles,
+    std::vector<model::Tile>& parsedTiles,
+    String& error,
+    const char* contextPrefix) {
+  parsedTiles.clear();
   std::size_t tileIndex = 0;
-  for (JsonVariantConst tileValue : tilesValue.as<JsonArrayConst>()) {
-    const std::string context = "dashboard.tiles[" + std::to_string(tileIndex) + "]";
+  for (JsonVariantConst tileValue : tiles) {
+    const std::string context =
+        std::string(contextPrefix ? contextPrefix : "tiles") +
+        "[" + std::to_string(tileIndex) + "]";
     if (!tileValue.is<JsonObjectConst>()) {
       setError(error, context + " must be an object");
       return false;
@@ -273,7 +294,7 @@ bool DashboardCodec::parseRequest(
     }
 
     if (!tile.key.isEmpty()) {
-      for (const auto& existing : parsed.tiles) {
+      for (const auto& existing : parsedTiles) {
         if (existing.key == tile.key) {
           setError(error, std::string("Duplicate tile id: ") + tile.key.c_str());
           return false;
@@ -314,8 +335,7 @@ bool DashboardCodec::parseRequest(
         }
         JsonObjectConst sourceItem = itemValue.as<JsonObjectConst>();
         String itemType;
-        if (!requireString(
-                sourceItem, "type", true, itemType, error, itemContext)) {
+        if (!requireString(sourceItem, "type", true, itemType, error, itemContext)) {
           return false;
         }
         model::TileItem item;
@@ -335,12 +355,80 @@ bool DashboardCodec::parseRequest(
       return false;
     }
 
-    tile.id = static_cast<std::uint16_t>(parsed.tiles.size());
-    parsed.tiles.push_back(std::move(tile));
+    tile.id = static_cast<std::uint16_t>(parsedTiles.size());
+    parsedTiles.push_back(std::move(tile));
     ++tileIndex;
   }
+  error = "";
+  return true;
+}
 
-  config = std::move(parsed);
+bool DashboardCodec::prepareExplicitUpgradeTiles(
+    const model::AppConfig& config,
+    std::vector<model::Tile>& tiles,
+    String& error) {
+  tiles.clear();
+  tiles.reserve(config.tiles.size());
+
+  for (const auto& sourceTile : config.tiles) {
+    model::Tile tile = sourceTile;
+
+    if (config.loadedFromLegacyScenes &&
+        sourceTile.type == model::TileType::Scene) {
+      if (sourceTile.items.empty()) {
+        setError(
+            error,
+            "Legacy scene has no devices and cannot be migrated to a dashboard tile");
+        tiles.clear();
+        return false;
+      }
+
+      if (sourceTile.items.size() == 1u) {
+        const auto& sourceItem = sourceTile.items.front();
+        tile.items.clear();
+        tile.items.push_back(sourceItem);
+        tile.type = sourceItem.type == model::TileItemType::Sensor
+            ? model::TileType::Sensor
+            : model::TileType::Switch;
+
+        // A legacy one-device scene carries both scene-level (visible tile)
+        // identity and device-level identity. A direct tile has only one
+        // name/icon, so preserve the scene-level values: they are what the
+        // dashboard showed before migration. MQTT/value/sensor fields still
+        // come from the sole device.
+        const String migratedName = sourceTile.name.isEmpty()
+            ? (sourceItem.type == model::TileItemType::Switch
+                   ? sourceItem.switchDevice.name
+                   : sourceItem.sensorDevice.name)
+            : sourceTile.name;
+        if (sourceItem.type == model::TileItemType::Switch) {
+          const String migratedIcon = sourceTile.icon.isEmpty()
+              ? sourceItem.switchDevice.icon
+              : sourceTile.icon;
+          tile.name = migratedName;
+          tile.icon = migratedIcon;
+          tile.items.front().switchDevice.name = migratedName;
+          tile.items.front().switchDevice.icon = migratedIcon;
+        } else {
+          tile.name = migratedName;
+          tile.items.front().sensorDevice.name = migratedName;
+        }
+      }
+    }
+
+    tile.id = static_cast<std::uint16_t>(tiles.size());
+    for (std::size_t itemIndex = 0; itemIndex < tile.items.size(); ++itemIndex) {
+      auto& item = tile.items[itemIndex];
+      item.id = static_cast<std::uint16_t>(itemIndex);
+      if (item.type == model::TileItemType::Switch) {
+        item.switchDevice.id = static_cast<std::uint16_t>(itemIndex);
+      } else {
+        item.sensorDevice.id = static_cast<std::uint16_t>(itemIndex);
+      }
+    }
+    tiles.push_back(std::move(tile));
+  }
+
   error = "";
   return true;
 }
@@ -401,7 +489,10 @@ bool DashboardCodec::serialize(
   if (!legacyRepresentable(config, error)) return false;
 
   JsonDocument document;
-  document["schemaVersion"] = model::AppConfig::kCurrentSchemaVersion;
+  const int envelopeSchema = config.schemaVersion >= 2
+      ? config.schemaVersion
+      : 2;
+  document["schemaVersion"] = envelopeSchema;
   JsonObject dashboard = document["dashboard"].to<JsonObject>();
   if (!appendCanonicalTiles(dashboard["tiles"].to<JsonArray>(), config.tiles, error)) {
     return false;
@@ -427,6 +518,12 @@ bool DashboardCodec::serialize(
   if (dashboardSource == DashboardSource::LastGood) sourceName = "lastGood";
   source["configuration"] = sourceName;
   source["legacy"] = config.loadedFromLegacyScenes;
+  source["layout"] = config.externalLayout ? "file" : "inline";
+  if (config.externalLayout) {
+    source["layoutFile"] = config.layoutFile.c_str();
+    source["layoutName"] = config.layoutName.c_str();
+    source["layoutRecovered"] = config.layoutRecoveredFromLastGood;
+  }
 
   JsonArray warnings = document["warnings"].to<JsonArray>();
   if (dashboardSource == DashboardSource::LastGood) {
@@ -434,6 +531,12 @@ bool DashboardCodec::serialize(
   }
   if (config.loadedFromLegacyScenes) {
     warnings.add("Legacy scenes are shown as lossless schema-v2 scene equivalents; saving migrates the dashboard to schema v2");
+  }
+  if (config.schemaVersion < model::AppConfig::kCurrentSchemaVersion) {
+    warnings.add("Configuration schema v3 is available; use Upgrade schema to externalize the current dashboard explicitly");
+  }
+  if (config.layoutRecoveredFromLastGood) {
+    warnings.add("Active layout file is invalid; dashboard content was recovered from the layout last-good backup");
   }
 
   if (document.overflowed()) {
@@ -455,13 +558,14 @@ bool DashboardCodec::serialize(
 bool DashboardCodec::replaceTiles(
     JsonDocument& document,
     const std::vector<model::Tile>& tiles,
-    String& error) {
+    String& error,
+    int targetSchemaVersion) {
   if (!document.is<JsonObject>()) {
     setError(error, "Base configuration must be a JSON object");
     return false;
   }
   JsonObject root = document.as<JsonObject>();
-  root["schemaVersion"] = model::AppConfig::kCurrentSchemaVersion;
+  root["schemaVersion"] = targetSchemaVersion;
   root.remove("scenes");
   root.remove("tiles");
   if (!appendCanonicalTiles(root["tiles"].to<JsonArray>(), tiles, error)) {

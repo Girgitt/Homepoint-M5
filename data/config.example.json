@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "hostname": "homepoint-m5",
 
   "mqttbroker": "mqtt://192.168.1.2:1883",

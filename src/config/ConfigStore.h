@@ -6,6 +6,7 @@
 
 #include "PersistentSettings.h"
 #include "DashboardCodec.h"
+#include "LayoutCodec.h"
 #include "../model/Model.h"
 
 namespace homepoint::config {
@@ -37,6 +38,22 @@ class ConfigStore {
   DashboardResult saveDashboardAtomically(
       const char* json, std::size_t length,
       String& normalizedJson, String& error);
+  DashboardResult getLayoutsJson(String& json, String& error) const;
+  DashboardResult getLayoutJson(
+      const String& filename, String& json, String& error) const;
+  DashboardResult validateLayout(
+      const String& filename, const String& name,
+      const char* json, std::size_t length,
+      String& normalizedJson, String& error) const;
+  DashboardResult saveLayoutAtomically(
+      const String& filename, const String& name,
+      const char* json, std::size_t length,
+      String& normalizedJson, bool& activeLayout, String& error);
+  DashboardResult setDashboardSource(
+      const char* json, std::size_t length, String& responseJson, String& error);
+  DashboardResult upgradeDashboardSchema(
+      const char* json, std::size_t length, String& responseJson, String& error);
+  bool isLayoutActive(const String& filename) const;
   bool saveTextFileAtomically(const String& path, const String& text, String& error);
   bool saveTextFileAtomically(
       const String& path, const char* text, std::size_t length, String& error);
@@ -56,6 +73,7 @@ class ConfigStore {
   static bool editableTextPath(const String& path);
   static bool deletablePath(const String& path);
   static bool uploadablePath(const String& path);
+  static bool validLayoutFilename(const String& filename);
 
  private:
   static constexpr const char* kConfigPath = "/config.json";
@@ -77,6 +95,14 @@ class ConfigStore {
   bool loadEditableDocument(
       JsonDocument& document, model::AppConfig& config,
       bool& recoveredFromLastGood, String& error) const;
+  bool loadLayoutDocument(
+      const String& filename, LayoutDocument& layout,
+      bool& recoveredFromLastGood, String& error) const;
+  bool loadLayoutFromPath(
+      const String& path, LayoutDocument& layout, String& error) const;
+  bool saveLayoutDocumentAtomically(
+      const String& filename, const LayoutDocument& layout, String& error);
+  bool writeConfigDocumentAtomically(JsonDocument& document, String& error);
   static bool looksLikeMemoryError(const String& error);
   bool replaceStagedFileAtomically(
       const String& stagedPath, const String& path, String& error);
@@ -85,6 +111,9 @@ class ConfigStore {
   static bool internalPath(const String& path);
   static std::uint32_t pathHash(const String& path);
   static String transactionPath(const String& path, const char* suffix);
+  static String layoutPath(const String& filename);
+  static String layoutLastGoodPath(const String& filename);
+  static String layoutNewPath(const String& filename);
   static String readFile(const char* path);
   static bool writeFile(const char* path, const String& content);
   static bool writeFile(

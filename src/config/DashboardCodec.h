@@ -28,6 +28,22 @@ class DashboardCodec {
       model::AppConfig& config,
       String& error);
 
+  static bool parseTiles(
+      JsonArrayConst tiles,
+      std::vector<model::Tile>& parsedTiles,
+      String& error,
+      const char* contextPrefix = "dashboard.tiles");
+
+  // Prepare runtime tiles for an explicit legacy -> structured-schema
+  // migration. Unlike serialize(), this operation is intentionally allowed to
+  // collapse a legacy one-device scene into a direct switch/sensor tile. The
+  // conversion is only used by the user-triggered Upgrade schema action; it is
+  // never performed implicitly while reading or editing legacy config.
+  static bool prepareExplicitUpgradeTiles(
+      const model::AppConfig& config,
+      std::vector<model::Tile>& tiles,
+      String& error);
+
   // Serialize a runtime dashboard to the editor envelope. Legacy dashboards are
   // accepted only when they can be represented without loss in schema v2.
   static bool serialize(
@@ -41,9 +57,9 @@ class DashboardCodec {
   static bool replaceTiles(
       JsonDocument& document,
       const std::vector<model::Tile>& tiles,
-      String& error);
+      String& error,
+      int targetSchemaVersion = model::AppConfig::kCurrentSchemaVersion);
 
- private:
   static bool appendCanonicalTiles(
       JsonArray target,
       const std::vector<model::Tile>& tiles,

@@ -341,6 +341,99 @@ void WebPortal::installRoutes() {
         handleDashboardBody(request, data, len, index, total, true);
       });
 
+  server_.on("/api/layouts", HTTP_GET, [this](AsyncWebServerRequest* request) {
+    if (!authenticate(request)) return;
+    String body;
+    String error;
+    const auto result = configStore_->getLayoutsJson(body, error);
+    if (result != config::DashboardResult::Ok) {
+      request->send(dashboardStatusCode(result), "application/json", jsonError(error));
+      return;
+    }
+    request->send(200, "application/json", body);
+  });
+
+  server_.on("/api/layout", HTTP_GET, [this](AsyncWebServerRequest* request) {
+    if (!authenticate(request)) return;
+    if (!request->hasParam("file")) {
+      request->send(400, "application/json", jsonError("Missing layout file"));
+      return;
+    }
+    const String filename = request->getParam("file")->value();
+    String body;
+    String error;
+    const auto result = configStore_->getLayoutJson(filename, body, error);
+    if (result != config::DashboardResult::Ok) {
+      request->send(dashboardStatusCode(result), "application/json", jsonError(error));
+      return;
+    }
+    request->send(200, "application/json", body);
+  });
+
+  server_.on(
+      "/api/layout/validate", HTTP_POST,
+      [this](AsyncWebServerRequest* request) {
+        if (!authenticate(request)) return;
+        if (!request->hasParam("file") || !request->hasParam("name")) {
+          request->send(400, "application/json", jsonError("Layout file and name are required"));
+          return;
+        }
+        if (request->contentLength() == 0) {
+          request->send(400, "application/json", jsonError("Layout body must not be empty"));
+        }
+      },
+      nullptr,
+      [this](AsyncWebServerRequest* request, std::uint8_t* data,
+             std::size_t len, std::size_t index, std::size_t total) {
+        handleLayoutBody(request, data, len, index, total, false);
+      });
+
+  server_.on(
+      "/api/layout", HTTP_PUT,
+      [this](AsyncWebServerRequest* request) {
+        if (!authenticate(request)) return;
+        if (!request->hasParam("file") || !request->hasParam("name")) {
+          request->send(400, "application/json", jsonError("Layout file and name are required"));
+          return;
+        }
+        if (request->contentLength() == 0) {
+          request->send(400, "application/json", jsonError("Layout body must not be empty"));
+        }
+      },
+      nullptr,
+      [this](AsyncWebServerRequest* request, std::uint8_t* data,
+             std::size_t len, std::size_t index, std::size_t total) {
+        handleLayoutBody(request, data, len, index, total, true);
+      });
+
+  server_.on(
+      "/api/dashboard/source", HTTP_PUT,
+      [this](AsyncWebServerRequest* request) {
+        if (!authenticate(request)) return;
+        if (request->contentLength() == 0) {
+          request->send(400, "application/json", jsonError("Dashboard source body must not be empty"));
+        }
+      },
+      nullptr,
+      [this](AsyncWebServerRequest* request, std::uint8_t* data,
+             std::size_t len, std::size_t index, std::size_t total) {
+        handleDashboardMutationBody(request, data, len, index, total, false);
+      });
+
+  server_.on(
+      "/api/dashboard/upgrade", HTTP_POST,
+      [this](AsyncWebServerRequest* request) {
+        if (!authenticate(request)) return;
+        if (request->contentLength() == 0) {
+          request->send(400, "application/json", jsonError("Upgrade body must not be empty"));
+        }
+      },
+      nullptr,
+      [this](AsyncWebServerRequest* request, std::uint8_t* data,
+             std::size_t len, std::size_t index, std::size_t total) {
+        handleDashboardMutationBody(request, data, len, index, total, true);
+      });
+
   server_.on("/api/files", HTTP_GET, [this](AsyncWebServerRequest* request) {
     if (!authenticate(request)) return;
     request->send(200, "application/json", configStore_->listFilesJson());
@@ -798,6 +891,129 @@ void WebPortal::handleDashboardBody(
 
   if (persist && reloadCallback_) reloadCallback_();
   request->send(200, "application/json", normalized);
+}
+
+
+void WebPortal::handleLayoutBody(
+    AsyncWebServerRequest* request,
+    std::uint8_t* data,
+    std::size_t len,
+    std::size_t index,
+    std::size_t total,
+    bool persist) {
+  if (!authenticate(request)) return;
+  if (!request->hasParam("file") || !request->hasParam("name")) return;
+
+  const bool bodyRangeInvalid = index > total || len > total - index;
+  if (total == 0 || total > kMaxEditableTextBytes || bodyRangeInvalid) {
+    if (index == 0) {
+      request->send(
+          total > kMaxEditableTextBytes ? 413 : 400,
+          "application/json",
+          jsonError(
+              total > kMaxEditableTextBytes
+                  ? "Layout is limited to 128 KiB"
+                  : "Invalid layout request body"));
+    }
+    return;
+  }
+
+  if (index == 0) {
+    auto* body = static_cast<char*>(allocateRequestBuffer(total + 1u));
+    if (!body) {
+      request->send(
+          507, "application/json",
+          jsonError("Not enough memory to buffer layout"));
+      return;
+    }
+    body[total] = '\0';
+    request->_tempObject = body;
+  }
+
+  auto* body = static_cast<char*>(request->_tempObject);
+  if (!body) return;
+  std::memcpy(body + index, data, len);
+  if (index + len != total) return;
+
+  const String filename = request->getParam("file")->value();
+  const String name = request->getParam("name")->value();
+  String normalized;
+  String error;
+  bool activeLayout = false;
+  const auto result = persist
+      ? configStore_->saveLayoutAtomically(
+            filename, name, body, total, normalized, activeLayout, error)
+      : configStore_->validateLayout(
+            filename, name, body, total, normalized, error);
+  free(body);
+  request->_tempObject = nullptr;
+
+  if (result != config::DashboardResult::Ok) {
+    request->send(
+        dashboardStatusCode(result), "application/json", jsonError(error));
+    return;
+  }
+
+  if (persist && activeLayout && reloadCallback_) reloadCallback_();
+  request->send(200, "application/json", normalized);
+}
+
+void WebPortal::handleDashboardMutationBody(
+    AsyncWebServerRequest* request,
+    std::uint8_t* data,
+    std::size_t len,
+    std::size_t index,
+    std::size_t total,
+    bool upgrade) {
+  if (!authenticate(request)) return;
+
+  const bool bodyRangeInvalid = index > total || len > total - index;
+  if (total == 0 || total > kMaxEditableTextBytes || bodyRangeInvalid) {
+    if (index == 0) {
+      request->send(
+          total > kMaxEditableTextBytes ? 413 : 400,
+          "application/json",
+          jsonError(
+              total > kMaxEditableTextBytes
+                  ? "Request is limited to 128 KiB"
+                  : "Invalid request body"));
+    }
+    return;
+  }
+
+  if (index == 0) {
+    auto* body = static_cast<char*>(allocateRequestBuffer(total + 1u));
+    if (!body) {
+      request->send(
+          507, "application/json",
+          jsonError("Not enough memory to buffer request"));
+      return;
+    }
+    body[total] = '\0';
+    request->_tempObject = body;
+  }
+
+  auto* body = static_cast<char*>(request->_tempObject);
+  if (!body) return;
+  std::memcpy(body + index, data, len);
+  if (index + len != total) return;
+
+  String response;
+  String error;
+  const auto result = upgrade
+      ? configStore_->upgradeDashboardSchema(body, total, response, error)
+      : configStore_->setDashboardSource(body, total, response, error);
+  free(body);
+  request->_tempObject = nullptr;
+
+  if (result != config::DashboardResult::Ok) {
+    request->send(
+        dashboardStatusCode(result), "application/json", jsonError(error));
+    return;
+  }
+
+  if (reloadCallback_) reloadCallback_();
+  request->send(200, "application/json", response);
 }
 
 String WebPortal::normalizeUploadPath(const String& filename) {

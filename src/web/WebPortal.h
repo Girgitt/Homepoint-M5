@@ -54,6 +54,20 @@ class WebPortal {
       std::size_t index,
       std::size_t total,
       bool persist);
+  void handleLayoutBody(
+      AsyncWebServerRequest* request,
+      std::uint8_t* data,
+      std::size_t len,
+      std::size_t index,
+      std::size_t total,
+      bool persist);
+  void handleDashboardMutationBody(
+      AsyncWebServerRequest* request,
+      std::uint8_t* data,
+      std::size_t len,
+      std::size_t index,
+      std::size_t total,
+      bool upgrade);
 
   static String normalizeUploadPath(const String& filename);
   static String normalizePath(const String& path);

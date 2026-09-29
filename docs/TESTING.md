@@ -58,10 +58,11 @@ M5Stack Core2. It tests deterministic application logic, including:
 - dashboard scene cardinality, duplicate IDs and sensor-type/type validation;
 - lossless legacy-dashboard handling and last-good recovery metadata;
 - dashboard replacement preserving unrelated and unknown configuration fields;
+- schema-v3 layout document parsing/serialization, friendly names and filename rules;
 - `UiController` navigation, command generation, haptic intent, detail paging,
   display-mode behavior, configuration replacement and screen-power behavior.
 
-`UiController.cpp` and the pure `DashboardCodec.cpp` are compiled into the native
+`UiController.cpp`, pure `DashboardCodec.cpp`, and `LayoutCodec.cpp` are compiled into the native
 test binary. The native environment pins ArduinoJson as a host dependency.
 `test/test_native/stubs/Arduino.h` provides only the small `String` surface
 required by the application model. This stub is not visible to firmware builds.
@@ -116,5 +117,6 @@ For changes to the embedded JavaScript, additionally extract the admin `<script>
 body and run `node --check` when Node.js is available. Browser-level behavior to
 exercise manually is: load an existing dashboard, select from hierarchy and
 preview, edit fields without losing focus, reorder tiles/items, add/delete,
-validate without saving, revert, save, and confirm that no editor action controls
-MQTT equipment.
+validate without saving, revert, save, create/select an inactive layout, activate it,
+copy it inline, exercise the explicit schema-upgrade action, and confirm that no
+editor action controls MQTT equipment.

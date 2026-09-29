@@ -133,10 +133,14 @@ struct ModelChange {
 };
 
 struct AppConfig {
-  static constexpr int kCurrentSchemaVersion = 2;
+  static constexpr int kCurrentSchemaVersion = 3;
 
   int schemaVersion = kCurrentSchemaVersion;
   bool loadedFromLegacyScenes = false;
+  bool externalLayout = false;
+  bool layoutRecoveredFromLastGood = false;
+  String layoutFile;
+  String layoutName;
   MqttConfig mqtt;
   UiConfig ui;
   HardwareConfig hardware;

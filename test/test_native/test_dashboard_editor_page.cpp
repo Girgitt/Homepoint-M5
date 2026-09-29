@@ -34,3 +34,24 @@ void test_admin_page_uses_whole_dashboard_api_without_live_control() {
   TEST_ASSERT_TRUE(contains(page, "Preview state is simulated and never controls MQTT"));
   TEST_ASSERT_FALSE(contains(page, "/api/dashboard/tile/"));
 }
+
+void test_admin_page_contains_layout_source_management() {
+  const char* page = homepoint::web::kAdminPage;
+
+  TEST_ASSERT_TRUE(contains(page, "id=\"layoutSelector\""));
+  TEST_ASSERT_TRUE(contains(page, "id=\"layoutName\""));
+  TEST_ASSERT_TRUE(contains(page, "Upgrade schema"));
+  TEST_ASSERT_TRUE(contains(page, "Set as active"));
+  TEST_ASSERT_TRUE(contains(page, "Use inline copy"));
+  TEST_ASSERT_TRUE(contains(page, "fetch('/api/layouts'"));
+  TEST_ASSERT_TRUE(contains(page, "fetch('/api/layout?file='"));
+  TEST_ASSERT_TRUE(contains(page, "'/api/layout/validate?file='"));
+  TEST_ASSERT_TRUE(contains(page, "fetch('/api/dashboard/source'"));
+  TEST_ASSERT_TRUE(contains(page, "fetch('/api/dashboard/upgrade'"));
+  TEST_ASSERT_TRUE(contains(
+      page,
+      "await loadLayoutCatalog();try{const r=await fetch('/api/dashboard'"));
+  TEST_ASSERT_TRUE(contains(
+      page,
+      "Use Upgrade schema to migrate this legacy configuration."));
+}

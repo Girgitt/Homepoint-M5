@@ -131,11 +131,11 @@ This makes the recovery path independent from MQTT/scenes JSON validity.
 ## Application configuration
 
 The application contract remains `/config.json`. New configurations use
-**schema version 2**, whose top-level dashboard collection is `tiles`:
+**schema version 3**. `tiles` may remain inline or reference a managed external layout file:
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "mqttbroker": "mqtt://192.168.2.1:1883",
   "ui": {
     "longPressMs": 600
@@ -154,14 +154,15 @@ The application contract remains `/config.json`. New configurations use
 }
 ```
 
-Schema-v2 tile types currently include direct `switch` and `sensor` devices
+Schema-v3 inline tile types currently include direct `switch` and `sensor` devices
 and true multi-item `scene` groups. A one-device dashboard entry should be a
 direct device tile rather than a one-item scene. The order of `tiles` is the
 dashboard order.
 
 Legacy Homepoint `scenes` configurations remain readable and are not rewritten
 automatically. Schema v2 also accepts `scenes` as a compatibility fallback when
-`tiles` is absent. Unsupported future schema versions are rejected instead of
+`tiles` is absent. Schema v3 additionally allows `tiles` to be a filename such as
+`"layout_ground_floor.json"`. Unsupported future schema versions are rejected instead of
 being guessed.
 
 `ui.longPressMs` controls the generic dashboard short/long-press classifier and
@@ -179,15 +180,23 @@ instead of per-tile CRUD endpoints:
 GET  /api/dashboard
 POST /api/dashboard/validate
 PUT  /api/dashboard
+GET  /api/layouts
+GET  /api/layout?file=layout_<name>.json
+POST /api/layout/validate?file=...&name=...
+PUT  /api/layout?file=...&name=...
+PUT  /api/dashboard/source
+POST /api/dashboard/upgrade
 ```
 
 The browser edits one complete dashboard draft. The editor API applies strict
-schema-v2 type/enum validation before persistence; a successful PUT atomically
+schema-v2/v3 type/enum validation before persistence; a successful PUT atomically
 replaces only the dashboard portion of the application configuration, preserves
 unrelated and unknown top-level configuration, and queues a main-task runtime
 reload. GET also reports whether content came from the active or last-good
-configuration and refuses legacy zero/one-member scenes rather than performing
-a lossy implicit migration.
+configuration and refuses legacy zero/one-member scenes during ordinary
+structured editing rather than performing a lossy implicit migration. The
+explicit Upgrade schema action can nevertheless migrate legacy one-device
+scenes to direct tiles before creating the schema-v3 layout file.
 
 The embedded web administration page now provides a hybrid dashboard editor: an
 ordered hierarchy for tiles/scene members, an inspector for properties, and a
@@ -212,7 +221,7 @@ EEPROM/NVS-backed record
 LittleFS /config.json
   station hostname
   MQTT
-  schema-v2 tiles / legacy scenes
+  schema-v3 inline/external tiles, schema-v2 tiles, legacy scenes
   switch and sensor state definitions
   UI/hardware preferences
         |
@@ -239,3 +248,36 @@ e5016f54a20d0a92d73e4f8ba0969ecf7fdeafdd
 
 Homepoint was originally created by Matthias Frick and distributed under the
 MIT license.
+
+
+### Schema v3 external layouts
+
+Schema v3 can reference a managed LittleFS layout instead of embedding the tile
+array in `config.json`:
+
+```json
+{
+  "schemaVersion": 3,
+  "tiles": "layout_ground_floor.json"
+}
+```
+
+The referenced file is self-describing and has a human-facing `name` that is
+independent of its filesystem-safe filename:
+
+```json
+{
+  "kind": "homepoint-layout",
+  "schemaVersion": 1,
+  "name": "Ground Floor",
+  "tiles": []
+}
+```
+
+The dashboard editor can create and edit inactive layouts, explicitly activate
+a selected layout, copy a layout back inline, and explicitly upgrade an older
+schema-v2 configuration. Layout filenames must match
+`layout_[A-Za-z0-9_-]+.json`; display names may contain spaces. Managed layouts
+are saved atomically and maintain their own last-good recovery copy, independent
+of `config.lastgood.json`. Selecting a layout for editing does not activate it;
+activation is a separate explicit action.

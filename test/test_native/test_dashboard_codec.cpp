@@ -163,6 +163,72 @@ void test_dashboard_codec_serializes_lossless_legacy_scene_with_warning() {
       2, doc["dashboard"]["tiles"][0]["items"].as<JsonArrayConst>().size());
 }
 
+void test_dashboard_codec_prepares_explicit_legacy_upgrade() {
+  AppConfig config;
+  config.schemaVersion = 1;
+  config.loadedFromLegacyScenes = true;
+
+  Tile oneDevice;
+  oneDevice.type = TileType::Scene;
+  oneDevice.name = "Outer scene name";
+  oneDevice.icon = "outer-icon";
+  TileItem lamp = switchItem("Desk Lamp", "desk");
+  lamp.switchDevice.icon = "bulb";
+  oneDevice.items.push_back(lamp);
+  config.tiles.push_back(oneDevice);
+
+  Tile multiDevice;
+  multiDevice.type = TileType::Scene;
+  multiDevice.name = "Living Room";
+  multiDevice.icon = "room";
+  multiDevice.items.push_back(switchItem("Ceiling", "ceiling"));
+  multiDevice.items.push_back(switchItem("Floor", "floor"));
+  config.tiles.push_back(multiDevice);
+
+  std::vector<Tile> upgraded;
+  String error;
+  TEST_ASSERT_TRUE_MESSAGE(
+      DashboardCodec::prepareExplicitUpgradeTiles(config, upgraded, error),
+      error.c_str());
+  TEST_ASSERT_EQUAL_UINT32(2, upgraded.size());
+
+  TEST_ASSERT_EQUAL_INT(
+      static_cast<int>(TileType::Switch),
+      static_cast<int>(upgraded[0].type));
+  TEST_ASSERT_EQUAL_STRING("Outer scene name", upgraded[0].name.c_str());
+  TEST_ASSERT_EQUAL_STRING("outer-icon", upgraded[0].icon.c_str());
+  TEST_ASSERT_EQUAL_UINT32(1, upgraded[0].items.size());
+  TEST_ASSERT_EQUAL_STRING(
+      "Outer scene name", upgraded[0].items[0].switchDevice.name.c_str());
+  TEST_ASSERT_EQUAL_STRING(
+      "outer-icon", upgraded[0].items[0].switchDevice.icon.c_str());
+  TEST_ASSERT_EQUAL_STRING(
+      "desk/state", upgraded[0].items[0].switchDevice.getTopic.c_str());
+
+  TEST_ASSERT_EQUAL_INT(
+      static_cast<int>(TileType::Scene),
+      static_cast<int>(upgraded[1].type));
+  TEST_ASSERT_EQUAL_STRING("Living Room", upgraded[1].name.c_str());
+  TEST_ASSERT_EQUAL_STRING("room", upgraded[1].icon.c_str());
+  TEST_ASSERT_EQUAL_UINT32(2, upgraded[1].items.size());
+}
+
+void test_dashboard_codec_rejects_empty_legacy_scene_upgrade() {
+  AppConfig config;
+  config.schemaVersion = 1;
+  config.loadedFromLegacyScenes = true;
+  Tile empty;
+  empty.type = TileType::Scene;
+  empty.name = "Empty";
+  config.tiles.push_back(empty);
+
+  std::vector<Tile> upgraded;
+  String error;
+  TEST_ASSERT_FALSE(
+      DashboardCodec::prepareExplicitUpgradeTiles(config, upgraded, error));
+  TEST_ASSERT_NOT_NULL(std::strstr(error.c_str(), "no devices"));
+}
+
 void test_dashboard_codec_marks_last_good_recovery() {
   AppConfig config;
   String output;
@@ -195,11 +261,57 @@ void test_dashboard_codec_replace_tiles_preserves_unrelated_config() {
   String error;
   TEST_ASSERT_TRUE_MESSAGE(DashboardCodec::replaceTiles(doc, tiles, error), error.c_str());
 
-  TEST_ASSERT_EQUAL(2, doc["schemaVersion"].as<int>());
+  TEST_ASSERT_EQUAL(3, doc["schemaVersion"].as<int>());
   TEST_ASSERT_EQUAL_STRING("homepoint", doc["hostname"].as<const char*>());
   TEST_ASSERT_EQUAL_STRING("mqtt://broker", doc["mqttbroker"].as<const char*>());
   TEST_ASSERT_EQUAL(42, doc["futureField"]["keep"].as<int>());
   TEST_ASSERT_TRUE(doc["scenes"].isNull());
   TEST_ASSERT_EQUAL_UINT32(1, doc["tiles"].as<JsonArrayConst>().size());
   TEST_ASSERT_EQUAL_STRING("lamp", doc["tiles"][0]["id"].as<const char*>());
+}
+
+void test_dashboard_codec_accepts_schema_v3_editor_envelope() {
+  const char* json = R"json({"schemaVersion":3,"dashboard":{"tiles":[
+    {"id":"lamp","type":"switch","name":"Lamp","getTopic":"lamp/state","setTopic":"lamp/set"}
+  ]}})json";
+  AppConfig config;
+  String error;
+  TEST_ASSERT_TRUE_MESSAGE(parse(json, config, error), error.c_str());
+  TEST_ASSERT_EQUAL(3, config.schemaVersion);
+  TEST_ASSERT_EQUAL_UINT32(1, config.tiles.size());
+}
+
+void test_dashboard_codec_serializes_external_layout_source() {
+  AppConfig config;
+  config.schemaVersion = 3;
+  config.externalLayout = true;
+  config.layoutFile = "layout_ground_floor.json";
+  config.layoutName = "Ground Floor";
+  config.layoutRecoveredFromLastGood = true;
+  String output;
+  String error;
+  TEST_ASSERT_TRUE_MESSAGE(
+      DashboardCodec::serialize(config, DashboardSource::Active, output, error),
+      error.c_str());
+  JsonDocument doc;
+  TEST_ASSERT_FALSE(deserializeJson(doc, output));
+  TEST_ASSERT_EQUAL_STRING("file", doc["source"]["layout"].as<const char*>());
+  TEST_ASSERT_EQUAL_STRING(
+      "layout_ground_floor.json", doc["source"]["layoutFile"].as<const char*>());
+  TEST_ASSERT_EQUAL_STRING("Ground Floor", doc["source"]["layoutName"].as<const char*>());
+  TEST_ASSERT_TRUE(doc["source"]["layoutRecovered"].as<bool>());
+}
+
+void test_dashboard_codec_replace_tiles_can_preserve_schema_v2() {
+  JsonDocument doc;
+  TEST_ASSERT_FALSE(deserializeJson(doc, R"json({"schemaVersion":2,"tiles":[]})json"));
+  Tile tile;
+  tile.key = "lamp";
+  tile.type = TileType::Switch;
+  tile.name = "Lamp";
+  tile.items.push_back(switchItem("Lamp", "lamp"));
+  std::vector<Tile> tiles{tile};
+  String error;
+  TEST_ASSERT_TRUE_MESSAGE(DashboardCodec::replaceTiles(doc, tiles, error, 2), error.c_str());
+  TEST_ASSERT_EQUAL(2, doc["schemaVersion"].as<int>());
 }

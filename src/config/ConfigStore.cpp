@@ -165,7 +165,7 @@ bool ConfigStore::ensureDefaultConfig() {
   "mqttusername": "",
   "mqttpasswd": "",
   "timezone": "CET-1CEST-2,M3.5.0/02:00:00,M10.5.0/03:00:00",
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "ui": {
     "longPressMs": 600
   },
@@ -442,15 +442,8 @@ bool ConfigStore::parseDocument(
     return true;
   };
 
-  auto parseV2Tiles = [&]() -> bool {
-    JsonVariantConst tilesValue = root["tiles"];
-    if (tilesValue.isNull()) return true;
-    if (!tilesValue.is<JsonArrayConst>()) {
-      error = "'tiles' must be an array";
-      return false;
-    }
-
-    for (JsonVariantConst tileValue : tilesValue.as<JsonArrayConst>()) {
+  auto parseTileArray = [&](JsonArrayConst tiles) -> bool {
+    for (JsonVariantConst tileValue : tiles) {
       if (!tileValue.is<JsonObjectConst>()) {
         error = "Each tile must be an object";
         return false;
@@ -538,11 +531,50 @@ bool ConfigStore::parseDocument(
     return false;
   }
 
-  if (schemaVersion == model::AppConfig::kCurrentSchemaVersion) {
-    parsed.schemaVersion = model::AppConfig::kCurrentSchemaVersion;
+  if (schemaVersion == 3) {
+    parsed.schemaVersion = 3;
+    parsed.loadedFromLegacyScenes = false;
+    JsonVariantConst tilesValue = root["tiles"];
+    if (tilesValue.isNull()) {
+      Serial.println("[CONFIG] schema: 3; no tiles configured");
+    } else if (tilesValue.is<JsonArrayConst>()) {
+      if (!parseTileArray(tilesValue.as<JsonArrayConst>())) return false;
+      Serial.printf(
+          "[CONFIG] schema: 3 inline; loaded %u tiles\n",
+          static_cast<unsigned>(parsed.tiles.size()));
+    } else if (tilesValue.is<const char*>()) {
+      const String filename = tilesValue.as<const char*>();
+      if (!validLayoutFilename(filename)) {
+        error = "Schema-v3 'tiles' layout reference must match layout_[A-Za-z0-9_-]+.json";
+        return false;
+      }
+      LayoutDocument layout;
+      bool recoveredLayout = false;
+      if (!loadLayoutDocument(filename, layout, recoveredLayout, error)) return false;
+      parsed.tiles = std::move(layout.tiles);
+      parsed.externalLayout = true;
+      parsed.layoutFile = filename;
+      parsed.layoutName = layout.name;
+      parsed.layoutRecoveredFromLastGood = recoveredLayout;
+      Serial.printf(
+          "[CONFIG] schema: 3 layout '%s' (%s); loaded %u tiles\n",
+          filename.c_str(),
+          recoveredLayout ? "last-good" : "active",
+          static_cast<unsigned>(parsed.tiles.size()));
+    } else {
+      error = "Schema-v3 'tiles' must be an array or a layout_*.json filename";
+      return false;
+    }
+  } else if (schemaVersion == 2) {
+    parsed.schemaVersion = 2;
     if (!root["tiles"].isNull()) {
+      JsonVariantConst tilesValue = root["tiles"];
+      if (!tilesValue.is<JsonArrayConst>()) {
+        error = "Schema-v2 'tiles' must be an array";
+        return false;
+      }
       parsed.loadedFromLegacyScenes = false;
-      if (!parseV2Tiles()) return false;
+      if (!parseTileArray(tilesValue.as<JsonArrayConst>())) return false;
       Serial.printf(
           "[CONFIG] schema: 2; loaded %u tiles\n",
           static_cast<unsigned>(parsed.tiles.size()));
@@ -692,6 +724,116 @@ bool ConfigStore::looksLikeMemoryError(const String& error) {
   return std::strstr(error.c_str(), "Not enough memory") != nullptr;
 }
 
+
+bool ConfigStore::loadLayoutFromPath(
+    const String& path, LayoutDocument& layout, String& error) const {
+  if (!LittleFS.exists(path)) {
+    error = path + " does not exist";
+    return false;
+  }
+  const String text = readFile(path.c_str());
+  return LayoutCodec::parse(text.c_str(), text.length(), layout, error);
+}
+
+bool ConfigStore::loadLayoutDocument(
+    const String& filename, LayoutDocument& layout,
+    bool& recoveredFromLastGood, String& error) const {
+  recoveredFromLastGood = false;
+  if (!validLayoutFilename(filename)) {
+    error = "Layout filename must match layout_[A-Za-z0-9_-]+.json";
+    return false;
+  }
+  String activeError;
+  if (loadLayoutFromPath(layoutPath(filename), layout, activeError)) {
+    error = "";
+    return true;
+  }
+  String backupError;
+  if (loadLayoutFromPath(layoutLastGoodPath(filename), layout, backupError)) {
+    recoveredFromLastGood = true;
+    error = "";
+    return true;
+  }
+  error = "No valid layout '" + filename + "': " + activeError;
+  if (!backupError.isEmpty()) error += "; last-good: " + backupError;
+  return false;
+}
+
+bool ConfigStore::saveLayoutDocumentAtomically(
+    const String& filename, const LayoutDocument& layout, String& error) {
+  if (!mounted_) {
+    error = "LittleFS is not mounted";
+    return false;
+  }
+  if (!validLayoutFilename(filename)) {
+    error = "Layout filename must match layout_[A-Za-z0-9_-]+.json";
+    return false;
+  }
+
+  String serialized;
+  if (!LayoutCodec::serialize(layout, serialized, error)) return false;
+
+  const String activePath = layoutPath(filename);
+  const String newPath = layoutNewPath(filename);
+  const String backupPath = layoutLastGoodPath(filename);
+  LittleFS.remove(newPath);
+  if (!writeFile(newPath.c_str(), serialized)) {
+    error = "Could not write temporary layout file";
+    LittleFS.remove(newPath);
+    return false;
+  }
+
+  LayoutDocument staged;
+  String stagedError;
+  if (!loadLayoutFromPath(newPath, staged, stagedError)) {
+    error = "Temporary layout validation failed: " + stagedError;
+    LittleFS.remove(newPath);
+    return false;
+  }
+
+  const bool hadActive = LittleFS.exists(activePath);
+  if (hadActive) {
+    LayoutDocument current;
+    String currentError;
+    if (loadLayoutFromPath(activePath, current, currentError)) {
+      if (!copyFile(activePath.c_str(), backupPath.c_str())) {
+        error = "Could not create layout last-good backup";
+        LittleFS.remove(newPath);
+        return false;
+      }
+    }
+  } else {
+    // A newly-created layout must not inherit a stale backup left behind by an
+    // older file that happened to use the same name.
+    LittleFS.remove(backupPath);
+  }
+
+  LittleFS.remove(activePath);
+  if (!LittleFS.rename(newPath, activePath)) {
+    error = "Could not activate new layout file";
+    LittleFS.remove(newPath);
+    return false;
+  }
+  error = "";
+  return true;
+}
+
+bool ConfigStore::writeConfigDocumentAtomically(
+    JsonDocument& document, String& error) {
+  if (document.overflowed()) {
+    error = "Not enough memory to build configuration";
+    return false;
+  }
+  String json;
+  const std::size_t bytes = measureJsonPretty(document);
+  if (!json.reserve(bytes + 1u)) {
+    error = "Not enough memory to allocate configuration JSON";
+    return false;
+  }
+  serializeJsonPretty(document, json);
+  return saveConfigAtomically(json.c_str(), json.length(), error);
+}
+
 DashboardResult ConfigStore::getDashboardJson(String& json, String& error) const {
   if (!mounted_) {
     error = "LittleFS is not mounted";
@@ -753,70 +895,491 @@ DashboardResult ConfigStore::saveDashboardAtomically(
         : DashboardResult::InvalidRequest;
   }
 
-  // Build the successful response before opening/copying the complete
-  // application configuration. This also proves that the normalized dashboard
-  // itself is serializable before any persistence occurs.
-  String normalizedCandidate;
-  if (!DashboardCodec::serialize(
-          dashboardConfig, DashboardSource::Active, normalizedCandidate, error)) {
+  JsonDocument currentDocument;
+  model::AppConfig baseConfig;
+  bool recoveredFromLastGood = false;
+  if (!loadEditableDocument(
+          currentDocument, baseConfig, recoveredFromLastGood, error)) {
     return looksLikeMemoryError(error)
         ? DashboardResult::InsufficientMemory
-        : DashboardResult::InvalidRequest;
+        : DashboardResult::Conflict;
   }
 
-  String mergedJson;
-  {
-    JsonDocument currentDocument;
-    bool recoveredFromLastGood = false;
-    {
-      model::AppConfig baseConfig;
-      if (!loadEditableDocument(
-              currentDocument, baseConfig, recoveredFromLastGood, error)) {
-        return looksLikeMemoryError(error)
-            ? DashboardResult::InsufficientMemory
-            : DashboardResult::Conflict;
-      }
+  if (baseConfig.externalLayout) {
+    LayoutDocument layout;
+    layout.name = baseConfig.layoutName;
+    layout.tiles = dashboardConfig.tiles;
+    if (!saveLayoutDocumentAtomically(baseConfig.layoutFile, layout, error)) {
+      return looksLikeMemoryError(error)
+          ? DashboardResult::InsufficientMemory
+          : DashboardResult::IoError;
     }
-
+    dashboardConfig.schemaVersion = 3;
+    dashboardConfig.externalLayout = true;
+    dashboardConfig.layoutFile = baseConfig.layoutFile;
+    dashboardConfig.layoutName = baseConfig.layoutName;
+    dashboardConfig.layoutRecoveredFromLastGood = false;
+  } else {
+    // Editing a v1/v2 inline dashboard must not silently opt into schema v3.
+    // Explicit schema migration is owned by /api/dashboard/upgrade.
+    const int targetSchema = baseConfig.schemaVersion >= 3 ? 3 : 2;
     if (!DashboardCodec::replaceTiles(
-            currentDocument, dashboardConfig.tiles, error)) {
+            currentDocument, dashboardConfig.tiles, error, targetSchema)) {
       return looksLikeMemoryError(error)
           ? DashboardResult::InsufficientMemory
           : DashboardResult::Conflict;
     }
-
-    // The tile data now lives in currentDocument. Release the parsed browser
-    // model before constructing the full merged AppConfig.
-    dashboardConfig = model::AppConfig{};
-
     {
       model::AppConfig validatedMergedConfig;
       if (!parseDocument(currentDocument, validatedMergedConfig, error)) {
         return DashboardResult::Conflict;
       }
     }
-
-    if (currentDocument.overflowed()) {
-      error = "Not enough memory to merge dashboard into configuration";
-      return DashboardResult::InsufficientMemory;
+    if (!writeConfigDocumentAtomically(currentDocument, error)) {
+      return looksLikeMemoryError(error)
+          ? DashboardResult::InsufficientMemory
+          : DashboardResult::IoError;
     }
-
-    const std::size_t mergedBytes = measureJsonPretty(currentDocument);
-    if (!mergedJson.reserve(mergedBytes + 1u)) {
-      error = "Not enough memory to allocate merged configuration";
-      return DashboardResult::InsufficientMemory;
-    }
-    serializeJsonPretty(currentDocument, mergedJson);
-  }  // release the complete JsonDocument before saveConfigAtomically reparses
-
-  if (!saveConfigAtomically(mergedJson.c_str(), mergedJson.length(), error)) {
-    if (looksLikeMemoryError(error)) return DashboardResult::InsufficientMemory;
-    return DashboardResult::IoError;
+    dashboardConfig.schemaVersion = targetSchema;
+    dashboardConfig.externalLayout = false;
   }
 
-  normalizedJson = normalizedCandidate;
+  if (!DashboardCodec::serialize(
+          dashboardConfig, DashboardSource::Active, normalizedJson, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::Conflict;
+  }
   error = "";
   return DashboardResult::Ok;
+}
+
+DashboardResult ConfigStore::getLayoutsJson(String& json, String& error) const {
+  if (!mounted_) {
+    error = "LittleFS is not mounted";
+    return DashboardResult::StorageUnavailable;
+  }
+
+  JsonDocument configDocument;
+  model::AppConfig config;
+  bool recoveredConfig = false;
+  if (!loadEditableDocument(configDocument, config, recoveredConfig, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::Conflict;
+  }
+
+  JsonDocument response;
+  response["configSchemaVersion"] = config.schemaVersion;
+  response["currentSchemaVersion"] = model::AppConfig::kCurrentSchemaVersion;
+  response["upgradeAvailable"] = config.schemaVersion < 3;
+  JsonObject active = response["active"].to<JsonObject>();
+  active["type"] = config.externalLayout ? "file" : "inline";
+  if (config.externalLayout) {
+    active["file"] = config.layoutFile.c_str();
+    active["name"] = config.layoutName.c_str();
+    active["recovered"] = config.layoutRecoveredFromLastGood;
+  }
+  active["configurationRecovered"] = recoveredConfig;
+
+  JsonArray layouts = response["layouts"].to<JsonArray>();
+  bool activeListed = false;
+  File root = LittleFS.open("/");
+  if (root && root.isDirectory()) {
+    File file = root.openNextFile();
+    while (file) {
+      if (!file.isDirectory()) {
+        String path = file.path() ? String(file.path()) : String();
+        String filename = path.startsWith("/") ? path.substring(1) : path;
+        if (validLayoutFilename(filename)) {
+          JsonObject item = layouts.add<JsonObject>();
+          item["file"] = filename.c_str();
+          const bool isActive = config.externalLayout && filename == config.layoutFile;
+          item["active"] = isActive;
+          if (isActive) activeListed = true;
+          LayoutDocument layout;
+          bool recovered = false;
+          String layoutError;
+          if (loadLayoutDocument(filename, layout, recovered, layoutError)) {
+            item["name"] = layout.name.c_str();
+            item["valid"] = true;
+            item["recovered"] = recovered;
+          } else {
+            item["name"] = filename.c_str();
+            item["valid"] = false;
+            item["error"] = layoutError.c_str();
+          }
+        }
+      }
+      file.close();
+      file = root.openNextFile();
+    }
+    root.close();
+  }
+  if (config.externalLayout && !activeListed) {
+    JsonObject item = layouts.add<JsonObject>();
+    item["file"] = config.layoutFile.c_str();
+    item["name"] = config.layoutName.c_str();
+    item["active"] = true;
+    item["valid"] = true;
+    item["recovered"] = config.layoutRecoveredFromLastGood;
+  }
+
+  JsonObject capabilities = response["capabilities"].to<JsonObject>();
+  capabilities["filePattern"] = "layout_[A-Za-z0-9_-]+.json";
+  capabilities["layoutSchemaVersion"] = LayoutDocument::kSchemaVersion;
+  capabilities["maxNameLength"] = LayoutDocument::kMaxNameLength;
+
+  if (response.overflowed()) {
+    error = "Not enough memory to list layouts";
+    return DashboardResult::InsufficientMemory;
+  }
+  json = "";
+  const std::size_t bytes = measureJson(response);
+  if (!json.reserve(bytes + 1u)) {
+    error = "Not enough memory to allocate layout list";
+    return DashboardResult::InsufficientMemory;
+  }
+  serializeJson(response, json);
+  error = "";
+  return DashboardResult::Ok;
+}
+
+DashboardResult ConfigStore::getLayoutJson(
+    const String& filename, String& json, String& error) const {
+  if (!mounted_) {
+    error = "LittleFS is not mounted";
+    return DashboardResult::StorageUnavailable;
+  }
+  if (!validLayoutFilename(filename)) {
+    error = "Invalid layout filename";
+    return DashboardResult::InvalidRequest;
+  }
+  LayoutDocument layout;
+  bool recovered = false;
+  if (!loadLayoutDocument(filename, layout, recovered, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::Conflict;
+  }
+  model::AppConfig config;
+  config.schemaVersion = 3;
+  config.externalLayout = true;
+  config.layoutFile = filename;
+  config.layoutName = layout.name;
+  config.layoutRecoveredFromLastGood = recovered;
+  config.tiles = std::move(layout.tiles);
+  if (!DashboardCodec::serialize(config, DashboardSource::Draft, json, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::Conflict;
+  }
+  return DashboardResult::Ok;
+}
+
+DashboardResult ConfigStore::validateLayout(
+    const String& filename,
+    const String& name,
+    const char* json,
+    std::size_t length,
+    String& normalizedJson,
+    String& error) const {
+  if (!validLayoutFilename(filename)) {
+    error = "Layout filename must match layout_[A-Za-z0-9_-]+.json";
+    return DashboardResult::InvalidRequest;
+  }
+  model::AppConfig config;
+  if (!DashboardCodec::parseRequest(json, length, config, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::InvalidRequest;
+  }
+  LayoutDocument layout;
+  layout.name = name;
+  layout.name.trim();
+  layout.tiles = config.tiles;
+  String ignored;
+  if (!LayoutCodec::serialize(layout, ignored, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::InvalidRequest;
+  }
+  config.schemaVersion = 3;
+  config.externalLayout = true;
+  config.layoutFile = filename;
+  config.layoutName = layout.name;
+  if (!DashboardCodec::serialize(config, DashboardSource::Draft, normalizedJson, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::InvalidRequest;
+  }
+  return DashboardResult::Ok;
+}
+
+DashboardResult ConfigStore::saveLayoutAtomically(
+    const String& filename,
+    const String& name,
+    const char* json,
+    std::size_t length,
+    String& normalizedJson,
+    bool& activeLayout,
+    String& error) {
+  if (!mounted_) {
+    error = "LittleFS is not mounted";
+    return DashboardResult::StorageUnavailable;
+  }
+  if (!validLayoutFilename(filename)) {
+    error = "Layout filename must match layout_[A-Za-z0-9_-]+.json";
+    return DashboardResult::InvalidRequest;
+  }
+  model::AppConfig config;
+  if (!DashboardCodec::parseRequest(json, length, config, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::InvalidRequest;
+  }
+  LayoutDocument layout;
+  layout.name = name;
+  layout.name.trim();
+  layout.tiles = config.tiles;
+  String validationJson;
+  if (!LayoutCodec::serialize(layout, validationJson, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::InvalidRequest;
+  }
+  if (!saveLayoutDocumentAtomically(filename, layout, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::IoError;
+  }
+  activeLayout = isLayoutActive(filename);
+  config.schemaVersion = 3;
+  config.externalLayout = true;
+  config.layoutFile = filename;
+  config.layoutName = layout.name;
+  if (!DashboardCodec::serialize(
+          config, activeLayout ? DashboardSource::Active : DashboardSource::Draft,
+          normalizedJson, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::Conflict;
+  }
+  return DashboardResult::Ok;
+}
+
+bool ConfigStore::isLayoutActive(const String& filename) const {
+  JsonDocument document;
+  model::AppConfig config;
+  bool recovered = false;
+  String error;
+  return loadEditableDocument(document, config, recovered, error) &&
+         config.externalLayout && config.layoutFile == filename;
+}
+
+DashboardResult ConfigStore::setDashboardSource(
+    const char* json,
+    std::size_t length,
+    String& responseJson,
+    String& error) {
+  if (!mounted_) {
+    error = "LittleFS is not mounted";
+    return DashboardResult::StorageUnavailable;
+  }
+  JsonDocument request;
+  const auto parsedRequest = deserializeJson(request, json, length);
+  if (parsedRequest || !request.is<JsonObjectConst>()) {
+    error = parsedRequest
+        ? String("JSON parse error: ") + parsedRequest.c_str()
+        : "Dashboard source request must be an object";
+    return parsedRequest == DeserializationError::NoMemory
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::InvalidRequest;
+  }
+  JsonVariantConst typeValue = request["type"];
+  if (!typeValue.is<const char*>()) {
+    error = "Dashboard source 'type' must be 'file' or 'inline'";
+    return DashboardResult::InvalidRequest;
+  }
+  const String type = typeValue.as<const char*>();
+
+  JsonDocument configDocument;
+  model::AppConfig baseConfig;
+  bool recoveredConfig = false;
+  if (!loadEditableDocument(configDocument, baseConfig, recoveredConfig, error)) {
+    return DashboardResult::Conflict;
+  }
+  if (recoveredConfig) {
+    error = "Active config.json is invalid; repair it before changing dashboard source";
+    return DashboardResult::Conflict;
+  }
+  JsonObject root = configDocument.as<JsonObject>();
+  root["schemaVersion"] = 3;
+  root.remove("scenes");
+
+  if (type == "file") {
+    JsonVariantConst fileValue = request["file"];
+    if (!fileValue.is<const char*>()) {
+      error = "File dashboard source requires 'file'";
+      return DashboardResult::InvalidRequest;
+    }
+    const String filename = fileValue.as<const char*>();
+    LayoutDocument layout;
+    bool recoveredLayout = false;
+    if (!loadLayoutDocument(filename, layout, recoveredLayout, error)) {
+      return DashboardResult::Conflict;
+    }
+    if (recoveredLayout) {
+      error = "Layout active file is invalid; save the recovered layout before activating it";
+      return DashboardResult::Conflict;
+    }
+    root["tiles"] = filename.c_str();
+  } else if (type == "inline") {
+    std::vector<model::Tile> tiles = baseConfig.tiles;
+    JsonVariantConst fileValue = request["file"];
+    if (!fileValue.isNull()) {
+      if (!fileValue.is<const char*>()) {
+        error = "Inline source 'file' must be a layout filename when present";
+        return DashboardResult::InvalidRequest;
+      }
+      LayoutDocument layout;
+      bool recoveredLayout = false;
+      if (!loadLayoutDocument(
+              String(fileValue.as<const char*>()), layout, recoveredLayout, error)) {
+        return DashboardResult::Conflict;
+      }
+      tiles = std::move(layout.tiles);
+    }
+    root.remove("tiles");
+    if (!DashboardCodec::appendCanonicalTiles(
+            root["tiles"].to<JsonArray>(), tiles, error)) {
+      return looksLikeMemoryError(error)
+          ? DashboardResult::InsufficientMemory
+          : DashboardResult::Conflict;
+    }
+  } else {
+    error = "Dashboard source 'type' must be 'file' or 'inline'";
+    return DashboardResult::InvalidRequest;
+  }
+
+  {
+    model::AppConfig validation;
+    if (!parseDocument(configDocument, validation, error)) {
+      return DashboardResult::Conflict;
+    }
+  }
+  if (!writeConfigDocumentAtomically(configDocument, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::IoError;
+  }
+  return getDashboardJson(responseJson, error);
+}
+
+DashboardResult ConfigStore::upgradeDashboardSchema(
+    const char* json,
+    std::size_t length,
+    String& responseJson,
+    String& error) {
+  if (!mounted_) {
+    error = "LittleFS is not mounted";
+    return DashboardResult::StorageUnavailable;
+  }
+  JsonDocument request;
+  const auto parsedRequest = deserializeJson(request, json, length);
+  if (parsedRequest || !request.is<JsonObjectConst>()) {
+    error = parsedRequest
+        ? String("JSON parse error: ") + parsedRequest.c_str()
+        : "Upgrade request must be an object";
+    return parsedRequest == DeserializationError::NoMemory
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::InvalidRequest;
+  }
+  JsonVariantConst fileValue = request["file"];
+  JsonVariantConst nameValue = request["name"];
+  if (!fileValue.is<const char*>() || !nameValue.is<const char*>()) {
+    error = "Upgrade requires string fields 'file' and 'name'";
+    return DashboardResult::InvalidRequest;
+  }
+  const String filename = fileValue.as<const char*>();
+  String name = nameValue.as<const char*>();
+  name.trim();
+  if (!validLayoutFilename(filename)) {
+    error = "Layout filename must match layout_[A-Za-z0-9_-]+.json";
+    return DashboardResult::InvalidRequest;
+  }
+  if (LittleFS.exists(layoutPath(filename))) {
+    error = "Layout file already exists; choose a different filename";
+    return DashboardResult::Conflict;
+  }
+
+  JsonDocument configDocument;
+  model::AppConfig baseConfig;
+  bool recoveredConfig = false;
+  if (!loadEditableDocument(configDocument, baseConfig, recoveredConfig, error)) {
+    return DashboardResult::Conflict;
+  }
+  if (recoveredConfig) {
+    error = "Active config.json is invalid; repair it before schema upgrade";
+    return DashboardResult::Conflict;
+  }
+  if (baseConfig.schemaVersion >= 3) {
+    error = "Configuration is already schema v3";
+    return DashboardResult::Conflict;
+  }
+
+  std::vector<model::Tile> upgradeTiles;
+  if (!DashboardCodec::prepareExplicitUpgradeTiles(
+          baseConfig, upgradeTiles, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::Conflict;
+  }
+
+  LayoutDocument layout;
+  layout.name = name;
+  layout.tiles = std::move(upgradeTiles);
+  String validationJson;
+  if (!LayoutCodec::serialize(layout, validationJson, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::Conflict;
+  }
+  if (!saveLayoutDocumentAtomically(filename, layout, error)) {
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::IoError;
+  }
+
+  auto cleanupCreatedLayout = [&]() {
+    LittleFS.remove(layoutPath(filename));
+    LittleFS.remove(layoutLastGoodPath(filename));
+    LittleFS.remove(layoutNewPath(filename));
+  };
+
+  JsonObject root = configDocument.as<JsonObject>();
+  root["schemaVersion"] = 3;
+  root.remove("scenes");
+  root["tiles"] = filename.c_str();
+  {
+    model::AppConfig validation;
+    if (!parseDocument(configDocument, validation, error)) {
+      cleanupCreatedLayout();
+      return looksLikeMemoryError(error)
+          ? DashboardResult::InsufficientMemory
+          : DashboardResult::Conflict;
+    }
+  }
+  if (!writeConfigDocumentAtomically(configDocument, error)) {
+    // The upgrade created this filename specifically for this transaction. If
+    // config activation fails, do not leave an orphaned managed layout that
+    // looks like a completed upgrade.
+    cleanupCreatedLayout();
+    return looksLikeMemoryError(error)
+        ? DashboardResult::InsufficientMemory
+        : DashboardResult::IoError;
+  }
+  return getDashboardJson(responseJson, error);
 }
 
 bool ConfigStore::saveTextFileAtomically(
@@ -1061,7 +1624,9 @@ void ConfigStore::appendFiles(
 }
 
 bool ConfigStore::internalPath(const String& path) {
-  return path.startsWith("/.__hpm5_") || path == kNewPath;
+  if (path.startsWith("/.__hpm5_") || path == kNewPath) return true;
+  if (!path.startsWith("/layout_")) return false;
+  return path.endsWith(".new.json") || path.endsWith(".lastgood.json");
 }
 
 std::uint32_t ConfigStore::pathHash(const String& path) {
@@ -1080,13 +1645,36 @@ String ConfigStore::transactionPath(const String& path, const char* suffix) {
   return out;
 }
 
+
+String ConfigStore::layoutPath(const String& filename) {
+  return String("/") + filename;
+}
+
+String ConfigStore::layoutLastGoodPath(const String& filename) {
+  String stem = filename;
+  if (stem.endsWith(".json")) stem.remove(stem.length() - 5u);
+  return String("/") + stem + ".lastgood.json";
+}
+
+String ConfigStore::layoutNewPath(const String& filename) {
+  String stem = filename;
+  if (stem.endsWith(".json")) stem.remove(stem.length() - 5u);
+  return String("/") + stem + ".new.json";
+}
+
 bool ConfigStore::safePath(const String& path) {
   return path.startsWith("/") && path.indexOf("..") < 0 &&
          path.indexOf('\\') < 0 && !internalPath(path);
 }
 
+bool ConfigStore::validLayoutFilename(const String& filename) {
+  return LayoutCodec::validFilename(filename);
+}
+
 bool ConfigStore::editableTextPath(const String& path) {
   if (!safePath(path) || path == "/" || path == kLastGoodPath) return false;
+  const String filename = path.startsWith("/") ? path.substring(1) : path;
+  if (validLayoutFilename(filename)) return false;
   String lower = path;
   lower.toLowerCase();
   return lower.endsWith(".json") || lower.endsWith(".txt") ||
@@ -1097,13 +1685,15 @@ bool ConfigStore::editableTextPath(const String& path) {
 }
 
 bool ConfigStore::deletablePath(const String& path) {
+  const String filename = path.startsWith("/") ? path.substring(1) : path;
   return safePath(path) && path != "/" && path != kConfigPath &&
-         path != kLastGoodPath;
+         path != kLastGoodPath && !validLayoutFilename(filename);
 }
 
 bool ConfigStore::uploadablePath(const String& path) {
+  const String filename = path.startsWith("/") ? path.substring(1) : path;
   return safePath(path) && path != "/" && path != kConfigPath &&
-         path != kLastGoodPath;
+         path != kLastGoodPath && !validLayoutFilename(filename);
 }
 
 String ConfigStore::readFile(const char* path) {

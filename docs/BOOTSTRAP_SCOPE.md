@@ -17,7 +17,7 @@ redesign.
 - Screen timeout and touch wake.
 - First-use configuration AP.
 - Browser-based configuration/file management.
-- JSON application configuration with schema-v2 `tiles` and legacy `scenes` compatibility.
+- JSON application configuration with schema-v3 inline/external `tiles`, schema-v2 `tiles`, and legacy `scenes` compatibility.
 - OTA firmware update.
 - Failsafe/recovery access.
 
@@ -42,11 +42,12 @@ revision-specific details. `powerFrom5vRailNotUsb` is mapped to
 
 ## Configuration model after bootstrap
 
-Schema version 2 makes the dashboard explicit through a top-level `tiles`
-array. Direct switch/sensor devices are tiles themselves; only genuine
-multi-item groups use `type: "scene"`. Legacy `scenes` input remains supported
-and is normalized into the same runtime tile model. See `CONFIG_SCHEMA.md` for
-the full contract and migration examples.
+Schema version 3 keeps the explicit top-level `tiles` contract and allows it
+to be either an inline tile array or a managed `layout_*.json` reference. Layout
+files carry a human-readable `name` and use the same normalized tile grammar.
+Schema version 2 inline tiles and legacy `scenes` input remain supported and are
+normalized into the same runtime tile model. See `CONFIG_SCHEMA.md` for the full
+contract and migration examples.
 
 ## Defer
 
