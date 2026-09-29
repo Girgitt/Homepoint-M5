@@ -189,6 +189,12 @@ reload. GET also reports whether content came from the active or last-good
 configuration and refuses legacy zero/one-member scenes rather than performing
 a lossy implicit migration.
 
+The embedded web administration page now provides a hybrid dashboard editor: an
+ordered hierarchy for tiles/scene members, an inspector for properties, and a
+side-by-side simulated Core2 3x2 screen. The preview is selection-only and uses
+simulated state; it never controls MQTT devices. Validate, Revert and Save operate
+on the complete browser draft through the API above.
+
 ## Persistence model
 
 Bootstrap settings and application configuration have different failure

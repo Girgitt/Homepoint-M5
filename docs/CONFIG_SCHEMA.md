@@ -543,3 +543,29 @@ hostname-reconciliation reboot loop.
 The bootstrap record remains responsible for Wi-Fi credentials and web
 credentials. Its historical hostname field is retained only so existing schema
 v1/v2 records remain readable.
+
+## Hybrid dashboard editor
+
+The embedded administration page consumes the dashboard API as one browser-owned
+draft. Editing is intentionally separated from operation of real equipment:
+
+- the **Dashboard structure** pane owns ordering, add/delete operations, and scene
+  membership;
+- the **Inspector** edits the selected tile or scene item;
+- the **Simulated Core2 screen** mirrors the 3x2 user dashboard layout and can be
+  clicked to select a top-level tile, but it never publishes MQTT commands;
+- **Validate** posts the complete draft to `/api/dashboard/validate` without
+  persistence;
+- **Save** PUTs the complete draft to `/api/dashboard` and accepts the normalized
+  response as the new saved baseline;
+- **Revert** restores the last GET/successful-save representation held by the
+  browser.
+
+The editor reads `tileTypes`, `sceneItemTypes`, `sensorTypes`,
+`maxVisibleTiles`, and `minSceneItems` from the API capability envelope. Device
+source warnings, including last-good recovery and lossless legacy conversion,
+are displayed above the editor rather than hidden.
+
+This editor is configuration-only. Runtime/live-state visualization and an
+explicit operate mode are separate later slices; 0029 deliberately does not add
+browser-to-MQTT control paths.

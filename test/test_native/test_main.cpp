@@ -11,6 +11,9 @@ void test_dashboard_codec_serializes_lossless_legacy_scene_with_warning();
 void test_dashboard_codec_marks_last_good_recovery();
 void test_dashboard_codec_replace_tiles_preserves_unrelated_config();
 
+void test_admin_page_contains_hybrid_dashboard_editor();
+void test_admin_page_uses_whole_dashboard_api_without_live_control();
+
 void test_haptic_press_pulse_is_bounded();
 void test_haptic_long_press_restarts_feedback_window();
 void test_haptic_stop_turns_active_pulse_off_immediately();
@@ -62,6 +65,9 @@ int main(int, char**) {
   RUN_TEST(test_dashboard_codec_serializes_lossless_legacy_scene_with_warning);
   RUN_TEST(test_dashboard_codec_marks_last_good_recovery);
   RUN_TEST(test_dashboard_codec_replace_tiles_preserves_unrelated_config);
+
+  RUN_TEST(test_admin_page_contains_hybrid_dashboard_editor);
+  RUN_TEST(test_admin_page_uses_whole_dashboard_api_without_live_control);
 
   RUN_TEST(test_haptic_press_pulse_is_bounded);
   RUN_TEST(test_haptic_long_press_restarts_feedback_window);

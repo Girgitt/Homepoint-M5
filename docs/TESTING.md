@@ -104,3 +104,17 @@ After changes that touch the relevant subsystem, verify at least:
 - web screenshot capture while awake and asleep;
 - file edit/upload/download and configuration recovery;
 - OTA update and reboot into the new firmware.
+
+## Hybrid dashboard editor checks
+
+The native suite also carries a lightweight contract check for the embedded
+admin page. It verifies that the hierarchy, simulated Core2 preview and
+inspector are present and that the page uses the whole-dashboard GET/validate/PUT
+API rather than per-tile or live-control endpoints.
+
+For changes to the embedded JavaScript, additionally extract the admin `<script>`
+body and run `node --check` when Node.js is available. Browser-level behavior to
+exercise manually is: load an existing dashboard, select from hierarchy and
+preview, edit fields without losing focus, reorder tiles/items, add/delete,
+validate without saving, revert, save, and confirm that no editor action controls
+MQTT equipment.
