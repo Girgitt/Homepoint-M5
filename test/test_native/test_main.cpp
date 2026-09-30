@@ -30,6 +30,7 @@ void test_admin_page_contains_hybrid_dashboard_editor();
 void test_admin_page_uses_whole_dashboard_api_without_live_control();
 void test_admin_page_contains_layout_source_management();
 void test_admin_page_supports_read_only_live_scene_navigation();
+void test_admin_page_supports_browser_local_dashboard_simulation();
 
 void test_haptic_press_pulse_is_bounded();
 void test_haptic_long_press_restarts_feedback_window();
@@ -102,6 +103,7 @@ int main(int, char**) {
   RUN_TEST(test_admin_page_uses_whole_dashboard_api_without_live_control);
   RUN_TEST(test_admin_page_contains_layout_source_management);
   RUN_TEST(test_admin_page_supports_read_only_live_scene_navigation);
+  RUN_TEST(test_admin_page_supports_browser_local_dashboard_simulation);
 
   RUN_TEST(test_haptic_press_pulse_is_bounded);
   RUN_TEST(test_haptic_long_press_restarts_feedback_window);

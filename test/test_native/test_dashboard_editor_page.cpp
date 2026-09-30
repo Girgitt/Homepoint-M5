@@ -55,6 +55,27 @@ void test_admin_page_supports_read_only_live_scene_navigation() {
   TEST_ASSERT_TRUE(contains(page, "Live state is available only for the saved active dashboard."));
 }
 
+
+void test_admin_page_supports_browser_local_dashboard_simulation() {
+  const char* page = homepoint::web::kAdminPage;
+
+  TEST_ASSERT_TRUE(contains(page, "id=\"dashboardPreviewSimulation\""));
+  TEST_ASSERT_TRUE(contains(page, ">Simulation</button>"));
+  TEST_ASSERT_TRUE(contains(page, "dashboardPreviewMode==='simulation'"));
+  TEST_ASSERT_TRUE(contains(page, "dashboardSimulationState=Object.create(null)"));
+  TEST_ASSERT_TRUE(contains(page, "applyDashboardSimulationMessage"));
+  TEST_ASSERT_TRUE(contains(page, "simulationFindKey"));
+  TEST_ASSERT_TRUE(contains(page, "renderDashboardSimulationInspector"));
+  TEST_ASSERT_TRUE(contains(page, "simulateSceneSwitches"));
+  TEST_ASSERT_TRUE(contains(page, "Reset to unknown"));
+  TEST_ASSERT_TRUE(contains(page, "Custom incoming payload"));
+  TEST_ASSERT_TRUE(contains(page, "Raw JSON payload"));
+  TEST_ASSERT_TRUE(contains(page, "Simulated messages never leave this page."));
+  TEST_ASSERT_TRUE(contains(page, "Simulation is local to this browser"));
+  TEST_ASSERT_FALSE(contains(page, "/api/dashboard/simulate"));
+  TEST_ASSERT_FALSE(contains(page, "/api/simulation"));
+}
+
 void test_admin_page_contains_layout_source_management() {
   const char* page = homepoint::web::kAdminPage;
 

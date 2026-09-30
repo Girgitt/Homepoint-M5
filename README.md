@@ -201,13 +201,20 @@ scenes to direct tiles before creating the schema-v3 layout file.
 
 The embedded web administration page provides a hybrid dashboard editor: an
 ordered hierarchy for tiles/scene members, an inspector for properties, and a
-side-by-side Core2 3x2 preview. **Configure** mode uses simulated values and edits
-the browser draft. **Live state** is available only for the saved active layout
-and polls `/api/dashboard/state` for read-only switch/sensor state and freshness.
+side-by-side Core2 3x2 preview. **Configure** edits the browser draft. **Live
+state** is available only for the saved active layout and polls
+`/api/dashboard/state` for read-only switch/sensor state and freshness.
+**Simulation** is entirely browser-local: the inspector becomes a type-specific
+message/value simulator, switch payloads use the configured `onValue`/`offValue`
+mapping, sensor payloads follow the configured raw/JSON interpretation, and
+scene graphics are derived from simulated member state. Simulation starts with
+unknown values and is cleared when the document/configuration changes or the page
+is reloaded. No simulated value is persisted or sent to the device.
+
 Single-click selects a preview item, double-click opens a scene, and Back returns
-to the top-level dashboard. Neither preview mode publishes MQTT commands. Validate,
-Revert and Save continue to operate on the complete browser draft through the API
-above.
+to the top-level dashboard in all three modes. Neither Live state nor Simulation
+publishes MQTT commands. Validate, Revert and Save continue to operate on the
+complete browser draft through the API above.
 
 ## Persistence model
 

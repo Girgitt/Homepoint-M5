@@ -111,9 +111,10 @@ After changes that touch the relevant subsystem, verify at least:
 
 The native suite also carries a lightweight contract check for the embedded
 admin page. It verifies that the hierarchy, Core2 preview and inspector are present,
-that configuration uses the whole-dashboard GET/validate/PUT API, and that the
-read-only preview uses `GET /api/dashboard/state` plus scene open/back navigation
-without introducing a browser MQTT-control endpoint.
+that configuration uses the whole-dashboard GET/validate/PUT API, that the
+read-only preview uses `GET /api/dashboard/state` plus scene open/back navigation,
+and that browser-local Simulation is present without introducing a simulation or
+MQTT-control endpoint.
 
 For changes to the embedded JavaScript, additionally extract the admin `<script>`
 body and run `node --check` when Node.js is available. Browser-level behavior to
@@ -122,5 +123,9 @@ preview, edit fields without losing focus, reorder tiles/items, add/delete,
 validate without saving, revert, save, create/select an inactive layout, activate it,
 copy it inline, exercise the explicit schema-upgrade action, open a scene with
 double-click and return with Back, switch the saved active layout into Live state,
-observe switch/sensor freshness, and confirm that no browser action controls MQTT
-equipment.
+and observe switch/sensor freshness. Then switch to Simulation and exercise: an
+unknown switch, configured OFF/ON payloads, an unrecognized custom switch payload,
+a raw sensor value, valid and invalid JSON sensor payloads, combined sensor values,
+scene all-off/partial/all-on graphics, reset-to-unknown, and scene open/back
+navigation. Confirm from the network/MQTT side that Simulation causes no request
+to a simulation endpoint and no MQTT/device control action.
