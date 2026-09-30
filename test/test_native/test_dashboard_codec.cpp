@@ -7,6 +7,7 @@
 #include <ArduinoJson.h>
 
 #include "../../src/config/DashboardCodec.h"
+#include "../../src/model/DashboardFingerprint.h"
 
 using homepoint::config::DashboardCodec;
 using homepoint::config::DashboardSource;
@@ -68,6 +69,13 @@ void test_dashboard_codec_accepts_and_normalizes_complete_draft() {
   String normalized;
   TEST_ASSERT_TRUE_MESSAGE(
       DashboardCodec::serialize(config, DashboardSource::Draft, normalized, error), error.c_str());
+  {
+    JsonDocument normalizedDoc;
+    TEST_ASSERT_FALSE(deserializeJson(normalizedDoc, normalized.c_str()));
+    TEST_ASSERT_EQUAL_STRING(
+        homepoint::model::dashboardFingerprint(config).c_str(),
+        normalizedDoc["dashboardFingerprint"].as<const char*>());
+  }
   AppConfig reparsed;
   TEST_ASSERT_TRUE_MESSAGE(
       DashboardCodec::parseRequest(

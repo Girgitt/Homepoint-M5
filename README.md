@@ -186,6 +186,7 @@ POST /api/layout/validate?file=...&name=...
 PUT  /api/layout?file=...&name=...
 PUT  /api/dashboard/source
 POST /api/dashboard/upgrade
+GET  /api/dashboard/state
 ```
 
 The browser edits one complete dashboard draft. The editor API applies strict
@@ -198,11 +199,15 @@ structured editing rather than performing a lossy implicit migration. The
 explicit Upgrade schema action can nevertheless migrate legacy one-device
 scenes to direct tiles before creating the schema-v3 layout file.
 
-The embedded web administration page now provides a hybrid dashboard editor: an
+The embedded web administration page provides a hybrid dashboard editor: an
 ordered hierarchy for tiles/scene members, an inspector for properties, and a
-side-by-side simulated Core2 3x2 screen. The preview is selection-only and uses
-simulated state; it never controls MQTT devices. Validate, Revert and Save operate
-on the complete browser draft through the API above.
+side-by-side Core2 3x2 preview. **Configure** mode uses simulated values and edits
+the browser draft. **Live state** is available only for the saved active layout
+and polls `/api/dashboard/state` for read-only switch/sensor state and freshness.
+Single-click selects a preview item, double-click opens a scene, and Back returns
+to the top-level dashboard. Neither preview mode publishes MQTT commands. Validate,
+Revert and Save continue to operate on the complete browser draft through the API
+above.
 
 ## Persistence model
 

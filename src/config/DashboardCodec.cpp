@@ -3,6 +3,8 @@
 #include <string>
 #include <utility>
 
+#include "../model/DashboardFingerprint.h"
+
 namespace homepoint::config {
 namespace {
 
@@ -493,6 +495,7 @@ bool DashboardCodec::serialize(
       ? config.schemaVersion
       : 2;
   document["schemaVersion"] = envelopeSchema;
+  document["dashboardFingerprint"] = model::dashboardFingerprint(config).c_str();
   JsonObject dashboard = document["dashboard"].to<JsonObject>();
   if (!appendCanonicalTiles(dashboard["tiles"].to<JsonArray>(), config.tiles, error)) {
     return false;

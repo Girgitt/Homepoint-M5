@@ -59,11 +59,12 @@ M5Stack Core2. It tests deterministic application logic, including:
 - lossless legacy-dashboard handling and last-good recovery metadata;
 - dashboard replacement preserving unrelated and unknown configuration fields;
 - schema-v3 layout document parsing/serialization, friendly names and filename rules;
+- read-only runtime-state serialization, known/unknown values, freshness age and millis wraparound;
 - `UiController` navigation, command generation, haptic intent, detail paging,
   display-mode behavior, configuration replacement and screen-power behavior.
 
-`UiController.cpp`, pure `DashboardCodec.cpp`, and `LayoutCodec.cpp` are compiled into the native
-test binary. The native environment pins ArduinoJson as a host dependency.
+`UiController.cpp`, pure `DashboardCodec.cpp`, `LayoutCodec.cpp`, and
+`RuntimeStateCodec.cpp` are compiled into the native test binary. The native environment pins ArduinoJson as a host dependency.
 `test/test_native/stubs/Arduino.h` provides only the small `String` surface
 required by the application model. This stub is not visible to firmware builds.
 
@@ -109,14 +110,17 @@ After changes that touch the relevant subsystem, verify at least:
 ## Hybrid dashboard editor checks
 
 The native suite also carries a lightweight contract check for the embedded
-admin page. It verifies that the hierarchy, simulated Core2 preview and
-inspector are present and that the page uses the whole-dashboard GET/validate/PUT
-API rather than per-tile or live-control endpoints.
+admin page. It verifies that the hierarchy, Core2 preview and inspector are present,
+that configuration uses the whole-dashboard GET/validate/PUT API, and that the
+read-only preview uses `GET /api/dashboard/state` plus scene open/back navigation
+without introducing a browser MQTT-control endpoint.
 
 For changes to the embedded JavaScript, additionally extract the admin `<script>`
 body and run `node --check` when Node.js is available. Browser-level behavior to
 exercise manually is: load an existing dashboard, select from hierarchy and
 preview, edit fields without losing focus, reorder tiles/items, add/delete,
 validate without saving, revert, save, create/select an inactive layout, activate it,
-copy it inline, exercise the explicit schema-upgrade action, and confirm that no
-editor action controls MQTT equipment.
+copy it inline, exercise the explicit schema-upgrade action, open a scene with
+double-click and return with Back, switch the saved active layout into Live state,
+observe switch/sensor freshness, and confirm that no browser action controls MQTT
+equipment.

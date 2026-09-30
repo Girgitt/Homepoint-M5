@@ -138,6 +138,7 @@ void App::setup() {
       displayCaptureReady ? &displayCapture_ : nullptr,
       [this]() { queueConfigurationReload(); },
       [this](bool enabled) { setDebugUi(enabled); });
+  web_.updateRuntimeState(config_, millis(), true);
 }
 
 void App::loop() {
@@ -147,6 +148,7 @@ void App::loop() {
   mqtt_.tick();
   web_.tick();
   processPendingConfigurationReload();
+  web_.updateRuntimeState(config_, millis());
   maybeConfigureTime();
   processPendingUiStatusChanges();
   processPendingUiControls();
@@ -206,6 +208,7 @@ void App::reloadConfiguration() {
       &config_,
       uiBackend_->layoutMetrics(uiController_.debugMode()));
   uiBackend_->setConfig(&config_);
+  web_.updateRuntimeState(config_, millis(), true);
   clearUiMessage();
   timeConfigured_ = false;
 }

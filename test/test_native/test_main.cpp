@@ -20,9 +20,16 @@ void test_layout_codec_accepts_named_layout_with_spaces();
 void test_layout_codec_rejects_invalid_identity_and_name();
 void test_layout_filename_contract();
 
+void test_runtime_state_codec_serializes_known_switch_state_and_age();
+void test_runtime_state_codec_preserves_unknown_sensor_state();
+void test_runtime_state_codec_aggregates_scene_switches_and_member_values();
+void test_runtime_state_codec_age_survives_millis_wraparound();
+void test_dashboard_fingerprint_ignores_runtime_values_but_tracks_configuration();
+
 void test_admin_page_contains_hybrid_dashboard_editor();
 void test_admin_page_uses_whole_dashboard_api_without_live_control();
 void test_admin_page_contains_layout_source_management();
+void test_admin_page_supports_read_only_live_scene_navigation();
 
 void test_haptic_press_pulse_is_bounded();
 void test_haptic_long_press_restarts_feedback_window();
@@ -85,9 +92,16 @@ int main(int, char**) {
   RUN_TEST(test_layout_codec_rejects_invalid_identity_and_name);
   RUN_TEST(test_layout_filename_contract);
 
+  RUN_TEST(test_runtime_state_codec_serializes_known_switch_state_and_age);
+  RUN_TEST(test_runtime_state_codec_preserves_unknown_sensor_state);
+  RUN_TEST(test_runtime_state_codec_aggregates_scene_switches_and_member_values);
+  RUN_TEST(test_runtime_state_codec_age_survives_millis_wraparound);
+  RUN_TEST(test_dashboard_fingerprint_ignores_runtime_values_but_tracks_configuration);
+
   RUN_TEST(test_admin_page_contains_hybrid_dashboard_editor);
   RUN_TEST(test_admin_page_uses_whole_dashboard_api_without_live_control);
   RUN_TEST(test_admin_page_contains_layout_source_management);
+  RUN_TEST(test_admin_page_supports_read_only_live_scene_navigation);
 
   RUN_TEST(test_haptic_press_pulse_is_bounded);
   RUN_TEST(test_haptic_long_press_restarts_feedback_window);

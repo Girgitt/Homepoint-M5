@@ -33,6 +33,8 @@ struct SwitchDevice {
   String offValue;
   String icon;
   bool active = false;
+  bool stateKnown = false;
+  std::uint32_t lastUpdateMs = 0;
 };
 
 struct SensorDevice {
@@ -47,6 +49,8 @@ struct SensorDevice {
   String secondIcon;
   String firstValue = "-";
   String secondValue = "-";
+  bool valueKnown = false;
+  std::uint32_t lastUpdateMs = 0;
 };
 
 struct TileItem {

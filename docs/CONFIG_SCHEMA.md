@@ -24,6 +24,7 @@ POST /api/layout/validate?file=...&name=...
 PUT  /api/layout?file=...&name=...
 PUT  /api/dashboard/source
 POST /api/dashboard/upgrade
+GET  /api/dashboard/state
 ```
 
 `GET` returns a normalized editable representation plus modest capability and
@@ -88,6 +89,19 @@ direct switch/sensor tile. The visible scene-level `name` and `icon` are kept
 for the direct tile, while MQTT/value/sensor fields come from the sole legacy
 device. A zero-device legacy scene still cannot be migrated and must be
 corrected in the raw configuration first.
+
+### Read-only runtime-state API
+
+`GET /api/dashboard/state` returns a cached main-task snapshot of the currently
+active runtime model. The AsyncWebServer task does not traverse mutable runtime
+vectors directly. The snapshot has its own `schemaVersion: 1`, reports active
+inline/file source identity plus Wi-Fi/MQTT connection status, and carries per-item
+`known`, `ageMs`, switch `active`, and sensor value fields. `ageMs` uses unsigned
+`millis()` subtraction so it remains valid across the normal 32-bit timer wrap.
+Unknown values are distinct from a known `false` switch state or a literal sensor
+value of `"-"`. Snapshot generation is demand-driven while Live state is being
+viewed; an expired cache returns a short `503` refresh-pending response rather than
+serving stale `ageMs` data, and the browser retries after the main loop refreshes it.
 
 The typed layout endpoints deliberately own managed `layout_*.json` files. The
 generic file editor can display those files but cannot overwrite/delete them;
@@ -626,8 +640,9 @@ draft. Editing is intentionally separated from operation of real equipment:
 - the **Dashboard structure** pane owns ordering, add/delete operations, and scene
   membership;
 - the **Inspector** edits the selected tile or scene item;
-- the **Simulated Core2 screen** mirrors the 3x2 user dashboard layout and can be
-  clicked to select a top-level tile, but it never publishes MQTT commands;
+- the **Core2 preview** mirrors the 3x2 user dashboard layout; single-click selects,
+  double-click opens a scene, scene members can be selected in the detail view, and
+  Back returns to the top-level dashboard;
 - **Validate** posts the complete draft to `/api/dashboard/validate` without
   persistence;
 - **Save** PUTs the complete draft to `/api/dashboard` and accepts the normalized
@@ -650,6 +665,10 @@ The editor reads `tileTypes`, `sceneItemTypes`, `sensorTypes`,
 source warnings, including last-good recovery and lossless legacy conversion,
 are displayed above the editor rather than hidden.
 
-This editor remains configuration-only after the schema-v3/layout-source slice.
-Runtime/live-state visualization and an explicit operate mode are separate later
-slices; no browser-to-MQTT control path is introduced here.
+The preview has two deliberately separate modes. **Configure** renders simulated
+values from the browser-owned draft. **Live state** is enabled only when the editor
+is showing the saved active source; it polls `GET /api/dashboard/state` and overlays
+actual runtime switch/sensor values, Wi-Fi/MQTT connection state, known/unknown state and
+value age. Live mode disables configuration mutation controls and remains strictly
+read-only. Scene navigation works in both modes. No browser-to-MQTT publish/control
+path is introduced; that remains a later explicit Operate mode.

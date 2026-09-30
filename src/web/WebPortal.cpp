@@ -10,11 +10,14 @@
 #include <esp_heap_caps.h>
 
 #include "Pages.h"
+#include "../model/RuntimeStateCodec.h"
 
 namespace homepoint::web {
 namespace {
 
 constexpr std::size_t kMaxEditableTextBytes = 128u * 1024u;
+constexpr std::uint32_t kRuntimeStateRefreshMs = 500;
+constexpr std::uint32_t kRuntimeStateDemandWindowMs = 5000;
 
 struct UploadStatus {
   int statusCode;
@@ -89,10 +92,62 @@ void WebPortal::begin(
   displayCapture_ = displayCapture;
   reloadCallback_ = std::move(reloadCallback);
   debugUiChangedCallback_ = std::move(debugUiChangedCallback);
+  if (!runtimeStateMutex_) runtimeStateMutex_ = xSemaphoreCreateMutex();
 
   installRoutes();
   installCaptiveRoutes();
   server_.begin();
+}
+
+
+void WebPortal::updateRuntimeState(
+    const model::AppConfig& config,
+    std::uint32_t nowMs,
+    bool force) {
+  if (!force) {
+    if (!runtimeStateDemandSeen_.load(std::memory_order_relaxed)) return;
+    const auto lastRequest =
+        runtimeStateLastRequestMs_.load(std::memory_order_relaxed);
+    if (static_cast<std::uint32_t>(nowMs - lastRequest) >
+        kRuntimeStateDemandWindowMs) {
+      return;
+    }
+    if (runtimeStateBuilt_ &&
+        static_cast<std::uint32_t>(nowMs - runtimeStateLastBuildMs_) <
+            kRuntimeStateRefreshMs) {
+      return;
+    }
+  }
+
+  String body;
+  String error;
+  const String wifiStatus = wifi_ ? wifi_->statusText() : String("UNAVAILABLE");
+  const bool wifiConnected = wifi_ && wifi_->stationConnected();
+  const String mqttStatus = mqtt_ ? mqtt_->statusText() : String("UNAVAILABLE");
+  const bool mqttConnected =
+      mqtt_ && mqtt_->state() == network::MqttState::Connected;
+  const bool ok = model::RuntimeStateCodec::serialize(
+      config, wifiStatus, wifiConnected, mqttStatus, mqttConnected, nowMs,
+      body, error);
+
+  runtimeStateLastBuildMs_ = nowMs;
+  runtimeStateBuilt_ = true;
+  if (!runtimeStateMutex_) return;
+  if (xSemaphoreTake(runtimeStateMutex_, pdMS_TO_TICKS(20)) != pdTRUE) return;
+  if (ok) {
+    runtimeStateJson_ = body;
+    runtimeStateError_ = "";
+  } else {
+    runtimeStateJson_ = "";
+    runtimeStateError_ = error;
+  }
+  xSemaphoreGive(runtimeStateMutex_);
+  if (ok) {
+    runtimeStatePublishedAtMs_.store(nowMs, std::memory_order_relaxed);
+    runtimeStatePublished_.store(true, std::memory_order_release);
+  } else {
+    runtimeStatePublished_.store(false, std::memory_order_release);
+  }
 }
 
 bool WebPortal::authenticate(AsyncWebServerRequest* request) const {
@@ -298,6 +353,50 @@ void WebPortal::installRoutes() {
           }
         }
       });
+
+  // ESPAsyncWebServer callback handlers treat a URI as matching child paths
+  // (for example, /api/dashboard also matches /api/dashboard/state) and use
+  // the first matching handler. Register specific GET children before their
+  // parent route so runtime-state requests cannot be intercepted here.
+  server_.on("/api/dashboard/state", HTTP_GET, [this](AsyncWebServerRequest* request) {
+    if (!authenticate(request)) return;
+    const auto requestAtMs = millis();
+    runtimeStateLastRequestMs_.store(requestAtMs, std::memory_order_relaxed);
+    runtimeStateDemandSeen_.store(true, std::memory_order_relaxed);
+    const bool published =
+        runtimeStatePublished_.load(std::memory_order_acquire);
+    const auto publishedAtMs =
+        runtimeStatePublishedAtMs_.load(std::memory_order_relaxed);
+    if (!published ||
+        static_cast<std::uint32_t>(requestAtMs - publishedAtMs) >
+            kRuntimeStateRefreshMs * 2u) {
+      request->send(
+          503, "application/json",
+          jsonError("Runtime state refresh pending"));
+      return;
+    }
+    if (!runtimeStateMutex_) {
+      request->send(503, "application/json", jsonError("Runtime state cache is unavailable"));
+      return;
+    }
+
+    String body;
+    String error;
+    if (xSemaphoreTake(runtimeStateMutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
+      body = runtimeStateJson_;
+      error = runtimeStateError_;
+      xSemaphoreGive(runtimeStateMutex_);
+    } else {
+      error = "Runtime state cache is busy";
+    }
+
+    if (body.isEmpty()) {
+      if (error.isEmpty()) error = "Runtime state is not ready";
+      request->send(503, "application/json", jsonError(error));
+      return;
+    }
+    request->send(200, "application/json", body);
+  });
 
   server_.on("/api/dashboard", HTTP_GET, [this](AsyncWebServerRequest* request) {
     if (!authenticate(request)) return;

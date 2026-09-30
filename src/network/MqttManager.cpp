@@ -198,9 +198,21 @@ void MqttManager::handleMessage(String& topic, String& payload) {
         auto& device = item.switchDevice;
         if (device.getTopic != topic) continue;
         const bool before = device.active;
-        if (payload == device.onValue) device.active = true;
-        if (payload == device.offValue) device.active = false;
-        itemChanged = before != device.active;
+        const bool wasKnown = device.stateKnown;
+        bool recognized = false;
+        if (payload == device.onValue) {
+          device.active = true;
+          recognized = true;
+        }
+        if (payload == device.offValue) {
+          device.active = false;
+          recognized = true;
+        }
+        if (recognized) {
+          device.stateKnown = true;
+          device.lastUpdateMs = millis();
+          itemChanged = !wasKnown || before != device.active;
+        }
       } else {
         auto& device = item.sensorDevice;
         if (device.getTopic != topic) continue;
@@ -210,17 +222,36 @@ void MqttManager::handleMessage(String& topic, String& payload) {
           const String second = device.type == model::SensorType::CombinedValues
                                     ? jsonValueByKeyAnywhere(payload, device.secondKey)
                                     : "";
-          if (!first.isEmpty() && first != device.firstValue) {
-            device.firstValue = first;
+          const bool wasKnown = device.valueKnown;
+          bool recognized = false;
+          if (!first.isEmpty()) {
+            recognized = true;
+            if (first != device.firstValue) {
+              device.firstValue = first;
+              itemChanged = true;
+            }
+          }
+          if (!second.isEmpty()) {
+            recognized = true;
+            if (second != device.secondValue) {
+              device.secondValue = second;
+              itemChanged = true;
+            }
+          }
+          if (recognized) {
+            device.valueKnown = true;
+            device.lastUpdateMs = millis();
+            itemChanged = itemChanged || !wasKnown;
+          }
+        } else {
+          const bool wasKnown = device.valueKnown;
+          if (payload != device.firstValue) {
+            device.firstValue = payload;
             itemChanged = true;
           }
-          if (!second.isEmpty() && second != device.secondValue) {
-            device.secondValue = second;
-            itemChanged = true;
-          }
-        } else if (payload != device.firstValue) {
-          device.firstValue = payload;
-          itemChanged = true;
+          device.valueKnown = true;
+          device.lastUpdateMs = millis();
+          itemChanged = itemChanged || !wasKnown;
         }
       }
 

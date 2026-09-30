@@ -22,7 +22,7 @@ void test_admin_page_contains_hybrid_dashboard_editor() {
   TEST_ASSERT_TRUE(contains(page, "id=\"dashboardTree\""));
   TEST_ASSERT_TRUE(contains(page, "id=\"dashboardScreen\""));
   TEST_ASSERT_TRUE(contains(page, "id=\"dashboardInspector\""));
-  TEST_ASSERT_TRUE(contains(page, "Simulated Core2 screen"));
+  TEST_ASSERT_TRUE(contains(page, "Core2 preview"));
 }
 
 void test_admin_page_uses_whole_dashboard_api_without_live_control() {
@@ -31,8 +31,28 @@ void test_admin_page_uses_whole_dashboard_api_without_live_control() {
   TEST_ASSERT_TRUE(contains(page, "fetch('/api/dashboard'"));
   TEST_ASSERT_TRUE(contains(page, "fetch('/api/dashboard/validate'"));
   TEST_ASSERT_TRUE(contains(page, "method:'PUT'"));
-  TEST_ASSERT_TRUE(contains(page, "Preview state is simulated and never controls MQTT"));
+  TEST_ASSERT_TRUE(contains(page, "fetch('/api/dashboard/state'"));
+  TEST_ASSERT_TRUE(contains(page, "No MQTT writes are sent."));
   TEST_ASSERT_FALSE(contains(page, "/api/dashboard/tile/"));
+}
+
+void test_admin_page_supports_read_only_live_scene_navigation() {
+  const char* page = homepoint::web::kAdminPage;
+
+  TEST_ASSERT_TRUE(contains(page, "id=\"dashboardPreviewLive\""));
+  TEST_ASSERT_TRUE(contains(page, "id=\"dashboardPreviewWifi\""));
+  TEST_ASSERT_TRUE(contains(page, "id=\"dashboardPreviewMqtt\""));
+  TEST_ASSERT_TRUE(contains(page, ">Live state</button>"));
+  TEST_ASSERT_TRUE(contains(page, "openDashboardPreviewScene"));
+  TEST_ASSERT_TRUE(contains(page, "closeDashboardPreviewScene"));
+  TEST_ASSERT_TRUE(contains(page, "cell.ondblclick"));
+  TEST_ASSERT_TRUE(contains(page, "id=\"dashboardPreviewBack\""));
+  TEST_ASSERT_TRUE(contains(page, "dashboardPreviewMode==='live'"));
+  TEST_ASSERT_TRUE(contains(page, "runtimeFingerprintMatchesEditor"));
+  TEST_ASSERT_TRUE(contains(page, "runtimeIdentityText"));
+  TEST_ASSERT_FALSE(contains(page, "runtimeSourceMatchesEditor"));
+  TEST_ASSERT_FALSE(contains(page, "runtimeShapeMatchesEditor"));
+  TEST_ASSERT_TRUE(contains(page, "Live state is available only for the saved active dashboard."));
 }
 
 void test_admin_page_contains_layout_source_management() {
